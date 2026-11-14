@@ -169,6 +169,33 @@ for node in main["@graph"]:
     if isinstance(imgv, str) and not imgv.startswith(CANON):
         ERR.append("JSON-LD image must be absolute: " + imgv)
 
+# Витринные данные магазина в JSON-LD обязаны совпадать с data.js: поисковик читает
+# именно их, а карточку на странице человек правит в другом месте.
+gs = next((n for n in main["@graph"] if n.get("@type") == "GroceryStore"), None)
+if not gs:
+    ERR.append("no GroceryStore node in JSON-LD (blind)")
+else:
+    shop = json.loads(ctx.eval("JSON.stringify(SHOP)"))
+    dig = lambda v: re.sub(r"\D", "", str(v or ""))
+    if dig(gs.get("telephone")) != dig(shop["phone"]):
+        ERR.append("JSON-LD telephone drifted from SHOP.phone")
+    alt = [dig(x.get("telephone")) for x in (gs.get("alternateTelephone") or []) if isinstance(x, dict)]
+    if dig(shop["phone2"]) not in alt:
+        ERR.append("SHOP.phone2 is missing from JSON-LD alternateTelephone")
+    if not re.fullmatch(r"[₽$€£]", str(gs.get("priceRange", ""))):
+        ERR.append("priceRange must be a currency symbol, not prose: " + repr(gs.get("priceRange")))
+    oh = (gs.get("openingHoursSpecification") or [{}])[0]
+    if (oh.get("opens"), oh.get("closes")) != (shop["open"], shop["close"]):
+        ERR.append(f"JSON-LD hours {oh.get('opens')}-{oh.get('closes')} != SHOP {shop['open']}-{shop['close']}")
+    if len(oh.get("dayOfWeek") or []) != 7:
+        ERR.append("JSON-LD opening hours must list all 7 days")
+    geo = gs.get("geo") or {}
+    if abs(float(geo.get("latitude") or 0) - 59.957835) > 0.001 or abs(float(geo.get("longitude") or 0) - 30.30879) > 0.001:
+        ERR.append("JSON-LD geo drifted from the address on Сытнинская")
+    sameas = gs.get("sameAs") or []
+    if not any(str(shop["map"]).split("oid=")[-1].split("&")[0] in u for u in sameas):
+        ERR.append("JSON-LD sameAs does not point at the Yandex organisation from SHOP.map")
+
 vis = re.findall(r'<details[^>]*>\s*<summary>(.*?)</summary>\s*<div class="faq-body">(.*?)</div>\s*</details>', html, re.S)
 if not vis:
     ERR.append("FAQ visible blocks not parsed (blind)")
