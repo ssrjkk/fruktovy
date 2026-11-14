@@ -1,0 +1,11 @@
+chat-export-*.json
+vendor/
+assets/img/
+assets/fonts/
+assets/fonts.css
+assets/og.png
+assets/icon-192.png
+assets/icon-512.png
+assets/CREDITS.txt
+__pycache__/
+.venv/

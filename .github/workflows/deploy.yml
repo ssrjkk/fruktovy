@@ -1,0 +1,57 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: secret scan
+        env:
+          PATTERN: (xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,})
+        run: |
+          set -euo pipefail
+          rc=0
+          git grep -n -I -E "$PATTERN" -- . || rc=$?
+          if [ "$rc" -eq 0 ]; then echo "::error::Potential secret committed"; exit 1; fi
+          if [ "$rc" -ne 1 ]; then echo "::error::secret scan failed: git exit $rc"; exit "$rc"; fi
+          echo "Secret scan clean"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install pillow rcssmin rjsmin esprima quickjs qrcode
+      - name: Build (photos, fonts, vendors, SEO, minify)
+        run: python tools/build.py
+      - name: Cart unit tests (real JS engine)
+        run: python tools/test_cart.py
+      - name: Quality gate
+        run: python tools/check.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+  deploy:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
