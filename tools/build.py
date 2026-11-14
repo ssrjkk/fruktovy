@@ -207,7 +207,9 @@ def build_og():
         f = font_path(26); w = d.textlength(txt, font=f)
         d.rounded_rectangle([92, y, 92 + w + 56, y + 66], 33, fill=bg)
         d.text((120, y + 14), txt, font=f, fill=FIG_D)
-    img.save(A / "og.png", optimize=True); print("og.png ok")
+    # 256 цветов без дизеринга: 622 KB -> ~250 KB, текст не мылится, а это превью ползут краулеры.
+    img.quantize(colors=256, method=Image.FASTOCTREE, dither=0).save(A / "og.png", optimize=True)
+    print(f"og.png ok ({(A / 'og.png').stat().st_size // 1024} KB)")
 
 
 def build_icons_pwa():

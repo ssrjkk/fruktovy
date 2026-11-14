@@ -2,7 +2,7 @@
 var VERSION = "fd-20261114-124952";
 var CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./assets/fonts.css",
   "./js/data.js", "./js/main.js", "./assets/logo.svg", "./manifest.webmanifest",
-  "./assets/icon-192.png", "./assets/icon-512.png", "./assets/og.png",
+  "./assets/icon-192.png", "./assets/icon-512.png",
   "./vendor/swiper-bundle.min.css", "./vendor/swiper-bundle.min.js",
   "./vendor/lenis.min.js", "./vendor/gsap.min.js", "./vendor/ScrollTrigger.min.js"];
 self.addEventListener("install", function (e) {
