@@ -92,6 +92,10 @@ if symbols - used: ERR.append(f"sprite icons never used: {sorted(symbols - used)
 gtabs = set(re.findall(r'data-tab="([^"]+)"',
                        re.search(r'id="guideTabs".*?</div>', html, re.S).group(0)))
 cat_ids = {c["id"] for c in data["CATS"] if c["id"] not in ("all", "fav")}
+# У CATS только вывеска: поля товаров, затёсанные сюда же, читаются молча и ничего не ломают.
+cat_extra = sorted({c["id"]: sorted(set(c) - {"id", "name", "icon"}) for c in data["CATS"] if set(c) - {"id", "name", "icon"}}.items())
+if cat_extra:
+    ERR.append(f"category rows carrying product fields: {cat_extra}")
 GUIDE = data["GUIDE"]
 noguide = sorted(cat_ids - set(GUIDE))
 if noguide:
@@ -149,6 +153,48 @@ if 'rel="canonical"' not in html: ERR.append("no canonical")
 if "https://ssrjkk.github.io/fruktovy/sitemap.xml" not in (ROOT / "robots.txt").read_text(encoding="utf-8"):
     ERR.append("robots sitemap drift")
 CANON = "https://ssrjkk.github.io/fruktovy/"
+
+# Наполнение каталога: у каждой позиции свой вкус и своё хранение. Раньше peek
+# брал первый совет категории, и яблокам показывалось про бананы.
+DECOR = (ROOT / "css" / "style.css").read_text(encoding="utf-8")
+PIDS = [p["id"] for p in data["PRODUCTS"]]
+if len(PIDS) < 20:
+    ERR.append("product content scan blind")
+baduse = sorted(p["id"] for p in data["PRODUCTS"] if not 45 <= len(p.get("use", "")) <= 115)
+if baduse:
+    ERR.append(f"taste text out of 45..115 chars: {baduse}")
+badstore = sorted(p["id"] for p in data["PRODUCTS"] if not 30 <= len(p.get("store", "")) <= 100)
+if badstore:
+    ERR.append(f"storage note out of 30..100 chars: {badstore}")
+for field, label in (("use", "taste"), ("store", "storage")):
+    vals = [p.get(field, "") for p in data["PRODUCTS"]]
+    dup = sorted({v for v in vals if v and vals.count(v) > 1})
+    if dup:
+        ERR.append(f"same {label} text on several products: {dup}")
+if 'id="peekDesc"' not in html:
+    ERR.append("peek dialog has no place for the product taste text")
+for frag, what in (("+esc(p.use)+", "taste text never rendered on a card"),
+                   ("$('#peekDesc').textContent=p.use", "taste text never rendered in peek"),
+                   ("p.store||", "peek still uses the category note instead of the product one")):
+    if frag not in jsn:
+        ERR.append(what)
+for sel in (".p-use", ".peek-desc"):
+    m = re.search(re.escape(sel) + r"\{([^}]*)\}", DECOR)
+    if not m:
+        ERR.append(f"no style for {sel}")
+    elif sel == ".p-use" and "line-clamp" not in m.group(1):
+        ERR.append(".p-use has no line clamp: cards of different lengths will tear the grid")
+
+# Фон витрины: мягкий цвет и бумажное зерно. Сетка-«квадраты» и ходящие лучи — ровно то,
+# из-за чего магазин выглядит сгенерированным; их убрали по прямой просьбе.
+for cls in (".bg-grid", ".bg-rays"):
+    if cls in DECOR or cls[1:] in html:
+        ERR.append(f"decorative square layer still wired: {cls}")
+if re.search(r"data:image/svg\+xml[^)]*?M0 \d+h\d+M\d+ 0v\d+", DECOR):
+    ERR.append("square-grid pattern painted as a background overlay")
+for need in ("bg-mesh", "bg-grain"):
+    if need not in html:
+        ERR.append(f"background layer missing: {need}")
 
 
 def metaval(prop):

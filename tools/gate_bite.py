@@ -4,6 +4,7 @@
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,26 +12,36 @@ PY = sys.executable
 FILES = ["index.html", "sw.js", "css/style.css", "assets/og.png", "js/data.js", "js/main.js"]
 
 
+def _io(fn, *a, **kw):
+    """Файл секунду может быть занят Chrome из только что законченного прогона гейта."""
+    for _ in range(40):
+        try:
+            return fn(*a, **kw)
+        except OSError:
+            time.sleep(0.25)
+    raise SystemExit(f"file busy: {a[0] if a else fn}")
+
+
 def snapshot():
-    return {f: (ROOT / f).read_bytes() for f in FILES}
+    return {f: _io((ROOT / f).read_bytes) for f in FILES}
 
 
 def restore(state):
     for f, b in state.items():
-        (ROOT / f).write_bytes(b)
+        _io((ROOT / f).write_bytes, b)
 
 
 def mutate(path, old, new, count=1):
     p = ROOT / path
-    t = p.read_text(encoding="utf-8")
+    t = _io(p.read_text, encoding="utf-8")
     if t.count(old) < count:
         raise SystemExit(f"mutation anchor missing in {path}: {old[:60]!r}")
-    p.write_text(t.replace(old, new, count), encoding="utf-8")
+    _io(p.write_text, t.replace(old, new, count), encoding="utf-8")
 
 
 def mutate_bytes(path, extra):
     p = ROOT / path
-    p.write_bytes(p.read_bytes() + extra)
+    _io(p.write_bytes, _io(p.read_bytes) + extra)
 
 
 def run_gate():
@@ -154,6 +165,49 @@ CASES = [
      "sameAs does not point"),
     ("JSON-LD гео уехало с Сытнинской", "index.html", '"latitude":59.957835', '"latitude":59.99',
      "geo drifted"),
+    ("карточка без вкуса: esc(p.use) выкинут", "js/main.js",
+     """<p class="p-use">'+esc(p.use)+'</p>""", """<p class="p-use">'+esc(p.name)+'</p>""",
+     "taste text never rendered on a card"),
+    ("peek без описания товара", "js/main.js",
+     """$('#peekDesc').textContent=p.use;""", "",
+     "taste text never rendered in peek"),
+    ("peek снова берёт совет категории", "js/main.js",
+     "esc(p.store||tips[0].d)", "esc(tips[0].d)",
+     "peek still uses the category note"),
+    ("в peek нет места для описания", "index.html", 'id="peekDesc"', 'id="peekDescx"',
+     "peek dialog has no place"),
+    ("у текста на карточке нет клампа", "css/style.css",
+     "-webkit-line-clamp:2;-webkit-box-orient:vertical;", "",
+     ".p-use has no line clamp"),
+    ("описание в peek осталось без стиля", "css/style.css",
+     ".peek-desc{margin:0 0 16px;", ".peek-descx{margin:0 0 16px;",
+     "no style for .peek-desc"),
+    ("у позиции вкус стал обрывком", "js/data.js",
+     ",use:'Хрустят в салате и в шарлотке, дольками уходят в чай вместо печенья.'",
+     ",use:'Хрустят в салате.'",
+     "taste text out of 45..115"),
+    ("вкусы двух позиций слились", "js/data.js",
+     "use:'Разотрите между ладонями прямо над кастрюлей — так раскрывается дух.'",
+     "use:'Отмеряйте сухой ложкой и сразу закрывайте банку; молотые сыпьте в конце.'",
+     "same taste text on several products"),
+    ("хранение позиции уехало в CATS", "js/data.js",
+     "{id:'fruits',name:'Фрукты'}", "{id:'fruits',name:'Фрукты',store:'В прохладе'}",
+     "category rows carrying product fields"),
+    ("сетка-квадраты вернулась в фон", "index.html",
+     '<div class="bg-grain"', '<div class="bg-grid" aria-hidden="true"></div><div class="bg-grain"',
+     "decorative square layer still wired"),
+    ("ходящие лучи вернулись", "css/style.css",
+     "#progress{position:fixed", ".bg-rays{position:fixed;inset:0}#progress{position:fixed",
+     "decorative square layer still wired"),
+    ("паттерн-клетка вернулась в CSS", "css/style.css",
+     '.bg-grain{position:fixed',
+     '.bg-grain{position:fixed;background-image:url("data:image/svg+xml,%3Csvg '
+     "xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cpath "
+     "d='M0 60h120M60 0v120' stroke='%231b1220' stroke-opacity='.045'/%3E%3C/svg%3E\")",
+     "square-grid pattern painted"),
+    ("бумажное зерно сняли", "index.html",
+     '<div class="bg-grain" aria-hidden="true"></div>', "",
+     "background layer missing: bg-grain"),
 ]
 
 state = snapshot()
