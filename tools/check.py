@@ -81,8 +81,14 @@ for u in refs:
 if not checked: ERR.append("no local refs scanned (blind)")
 
 symbols = set(re.findall(r'<symbol id="i-([a-z0-9-]+)"', html))
-used = set(re.findall(r'ico\(\'([a-z0-9-]+)\'\)', (ROOT / "js" / "main.js").read_text(encoding="utf-8")))
+MAINJS = (ROOT / "js" / "main.js").read_text(encoding="utf-8")
+DATAJS = (ROOT / "js" / "data.js").read_text(encoding="utf-8")
+used = set(re.findall(r'ico\(\'([a-z0-9-]+)\'\)', MAINJS))
 used.update(re.findall(r'<use href="#i-([a-z0-9-]+)"', html))
+# Глифы вызываются и из данных: HOW-шаги в main.js и подсказки GUIDE в data.js.
+# Без этого блока новый глиф, заявленный только в данных, считался бы неиспользованным.
+used.update(re.findall(r"i:\s*'([a-z0-9-]+)'", MAINJS))
+used.update(re.findall(r"i:\s*'([a-z0-9-]+)'", DATAJS))
 if len(symbols) < 20: ERR.append("sprite scan blind")
 if used - symbols: ERR.append(f"icons used but not in sprite: {sorted(used - symbols)}")
 if symbols - used: ERR.append(f"sprite icons never used: {sorted(symbols - used)}")
@@ -109,6 +115,13 @@ if badicons:
 shorth = [f"{k}/{t['t']}" for k, tips in GUIDE.items() for t in tips if len(t.get("d", "")) < 40]
 if shorth:
     ERR.append("guide tips shorter than 40 chars: " + repr(shorth))
+# Два совета в одной вкладке с одним глифом читаются как одна и та же мысль:
+# подпись различить их не помогает, когда список проглядывают по иконкам.
+dup = {tab: sorted({t["i"] for t in tips if [x["i"] for x in tips].count(t["i"]) > 1})
+       for tab, tips in GUIDE.items()}
+dup = {k: v for k, v in dup.items() if v}
+if dup:
+    ERR.append("guide tabs reusing one glyph for two tips: " + repr(dup))
 
 # Контракт загрузки картинок: всё до каталога грузится жадно (это первый экран),
 # всё после — лениво. Первая же обязана быть заявлена как LCP.
@@ -470,6 +483,88 @@ for tok, bgs in (("--ring", (("paper", "--surface"), ("parchment", "--parch"))),
         rt = ratio(col(tok), col(bg))
         if rt < 3.0:
             ERR.append(f"contrast focus ring {tok} on {label}: {rt:.2f} < 3.0 (WCAG 1.4.11)")
+
+# --- Гейт геометрии иконок ---------------------------------------------------
+# Пороги сняты с замера живых пикселей (headless Chrome, растер 16/20 px) и
+# пересчитаны офлайн тем же движком: icon_geom воспроизводит те же числа, поэтому
+# CI кусается без браузера. Каждый пункт — про то, что видно глазом, а не про вкус.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import icon_geom as IG
+
+MIN_SUBLEN = 4.0      # короче — это точка, а не штрих: глаз читает мусор
+MIN_COMP16 = 10       # связный кусок силыэта на 16 px меньше — обрывок
+INK_LO, INK_HI = 0.05, 0.36   # доля залитых пикселей на 20 px: воздух или каша
+ALPHA_FLOOR = 0.45    # средняя плотность чернил вдоль осевой линии на 16 px
+DEV_STROKE_FLOOR = 1.30       # устройств-пикселей в самом мелком реальном размере
+IOU_CAP = 0.55        # выше — два глифа неотличимы друг от друга
+# Стрелки «назад/вперёд» и «−/+» зеркальны по смыслу и обязаны быть похожи.
+TWIN_OK = {frozenset(("i-left", "i-right")), frozenset(("i-minus", "i-plus"))}
+
+ic_rule = re.search(r"\.ic\{([^}]*)\}", CSS_MAIN)
+ic_sw = None
+if not ic_rule:
+    ERR.append("no .ic base rule: icon stroke contract cannot be measured")
+else:
+    body = ic_rule.group(1).replace(" ", "")
+    m = re.search(r"stroke-width:([\d.]+)", body)
+    if not m:
+        ERR.append(".ic lost stroke-width: sprite inherits it, glyphs go hairline")
+    else:
+        ic_sw = float(m.group(1))
+    for need in ("stroke:currentColor", "fill:none", "stroke-linecap:round", "stroke-linejoin:round"):
+        if need not in body:
+            ERR.append(f".ic lost {need}: every icon in the sprite renders wrong without it")
+    sizes = sorted({float(w) for sel, b in re.findall(r"([^{}]+)\{([^}]*)\}", CSS_MAIN)
+                    for s in sel.split(",")
+                    if re.search(r"(^|[\s>+~])\.ic(\b|$)", s.strip())
+                    for w in re.findall(r"(?<![\w-])width:(\d+(?:\.\d+)?)px", b)})
+    if not sizes:
+        ERR.append("no .ic host sizes found (blind)")
+    elif ic_sw and ic_sw * min(sizes) / 24.0 < DEV_STROKE_FLOOR:
+        ERR.append("icon stroke %.2f px device at %gpx, floor %.2f"
+                   % (ic_sw * min(sizes) / 24.0, min(sizes), DEV_STROKE_FLOOR))
+
+syms = IG.load_symbols(html)
+if len(syms) < 20:
+    ERR.append("icon geometry scan blind")
+masks, geo = {}, {}
+for sid, s in sorted(syms.items()):
+    span = max(s["box"])
+    els = s["els"]
+    els2 = [(t, dict(a)) for t, a in els]
+    for t, a in els2:
+        a.setdefault("fill", "none")
+    mixed = [t for t, a in els2
+             if a.get("fill", "none") not in ("none", "") and a.get("stroke") != "none"]
+    if mixed:
+        ERR.append(f"{sid}: element {mixed} is both filled and stroked (base .ic paints an outline over it)")
+    g = IG.glyph_metrics(els2, span, ic_sw or 2.0)
+    geo[sid] = g
+    stroked_any = any(a.get("stroke") != "none" for t, a in els2)
+    if g["minlen"] < MIN_SUBLEN:
+        ERR.append(f"{sid}: stroke shorter than {MIN_SUBLEN} user units ({g['minlen']})")
+    small = [c for c in g["c16"] if c < MIN_COMP16]
+    if small:
+        ERR.append(f"{sid}: fragment(s) of {small} px at 16px")
+    if g["gaps"]:
+        ERR.append(f"{sid}: two stroke ends left {g['gaps']} apart — one line drawn as two")
+    if stroked_any:
+        if not (INK_LO <= g["ink20"] <= INK_HI):
+            ERR.append(f"{sid}: ink weight {g['ink20']} outside {INK_LO}..{INK_HI} at 20px")
+        if g["alpha16"] < ALPHA_FLOOR:
+            ERR.append(f"{sid}: stroke alpha {g['alpha16']} below {ALPHA_FLOOR} at 16px (hairline)")
+    masks[sid] = IG.crop_norm([[1 if v >= 0.5 else 0 for v in row]
+                               for row in IG.raster_float(els2, 40, span, ic_sw or 2.0)[0]], n=32)
+
+ids = sorted(masks)
+twins = []
+for i, a in enumerate(ids):
+    for b in ids[i + 1:]:
+        v = IG.best_iou(masks[a], masks[b])
+        if v > IOU_CAP and frozenset((a, b)) not in TWIN_OK:
+            twins.append((round(v, 3), a, b))
+for v, a, b in sorted(twins, reverse=True):
+    ERR.append(f"icons {a}/{b} are the same silhouette (IoU {v} > {IOU_CAP})")
 
 for n in NOTES: print("NOTE:", n)
 if ERR:

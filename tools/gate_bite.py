@@ -45,7 +45,12 @@ def mutate_bytes(path, extra):
 
 
 def run_gate():
-    r = subprocess.run([PY, str(ROOT / "tools" / "check.py")], cwd=str(ROOT), capture_output=True, text=True)
+    # Дочерний python печатает кириллицу в пайп; без UTF-8 он выдаёт cp1251, и
+    # родитель не может это прочитать — мутация кажется некусающейся.
+    import os
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    r = subprocess.run([PY, str(ROOT / "tools" / "check.py")], cwd=str(ROOT),
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
@@ -109,11 +114,12 @@ CASES = [
      "guide tips without a tab"),
     ("гайд: категория без своих советов", "js/data.js", ",spices:[{", ",spicex:[{",
      "categories without guide tips"),
-    ("гайд: иконка советa не из спрайта", "js/data.js", "и сразу закрывайте.',i:'leaf'}]}",
-     "и сразу закрывайте.',i:'leafx'}]}", "guide icons missing from sprite"),
+    ("гайд: иконка советa не из спрайта", "js/data.js",
+     "держите их в стороне.',i:'apart'", "держите их в стороне.',i:'apartx'",
+     "guide icons missing from sprite"),
     ("гайд: совет выродился в слово", "js/data.js",
-     "{t:'Мягкие — в холодильник',d:'Финики и мягкий чернослив лучше хранить в холодильнике.',i:'clock'}",
-     "{t:'Мягкие',d:'в холод',i:'clock'}", "guide tips shorter than 40 chars"),
+     "{t:'Мягкие — в холодильник',d:'Финики и мягкий чернослив лучше хранить в холодильнике.',i:'cold'}",
+     "{t:'Мягкие',d:'в холод',i:'cold'}", "guide tips shorter than 40 chars"),
     ("LCP-арт потерял fetchpriority", "index.html",
      'alt="" fetchpriority="high" loading="eager"', 'alt="" loading="eager"',
      "exactly one img may claim fetchpriority"),
@@ -208,6 +214,39 @@ CASES = [
     ("бумажное зерно сняли", "index.html",
      '<div class="bg-grain" aria-hidden="true"></div>', "",
      "background layer missing: bg-grain"),
+    # --- геометрия иконок: каждый новый пункт гейта должен кусаться ---
+    ("штрих стал волосяным", "css/style.css",
+     "stroke-width:2.15", "stroke-width:1.05",
+     "icon stroke"),
+    ("у .ic сняли round caps — спрайт наследует", "css/style.css",
+     "stroke:currentColor;fill:none;stroke-width:2.15;stroke-linecap:round",
+     "stroke:currentColor;fill:none;stroke-width:2.15",
+     ".ic lost stroke-linecap:round"),
+    ("штрих срезан до точки", "index.html",
+     "M12 9.4v4.8", "M12 9.4v1.2",
+     "stroke shorter than"),
+    ("к глифу прилепился осколок", "index.html",
+     '<path d="m21.4 21.4-5-5"/>', '<path d="m21.4 21.4-5-5"/><circle cx="2.2" cy="21.8" r="0.9"/>',
+     "px at 16px"),
+    ("один штрих распался на два с зазором", "index.html",
+     "M12 6.5V12l3.8 2.2", "M12 6.5V12M12.6 12.6l3.2 1.8",
+     "two stroke ends left"),
+    ("лист стал копией глаза", "index.html",
+     "M11.4 20.6A7.6 7.6 0 0 1 10 6.4C16 5.2 17.6 4.6 19.8 2c1.1 2.2 2.2 4.6 2.2 8.6 0 5.9-5.2 10.6-10.6 10z",
+     "M1.5 12S5.5 4.5 12 4.5 22.5 12 22.5 12 18.5 19.5 12 19.5 1.5 12 1.5 12z",
+     "are the same silhouette"),
+    ("магазин залили жирным штрихом", "index.html",
+     '<path d="M2.6 9 4.8 3.4h14.4L21.4 9z"/>',
+     '<path stroke-width="6" d="M2.6 9 4.8 3.4h14.4L21.4 9z"/>',
+     "ink weight"),
+    ("звезда осталась и залита, и обведена", "index.html",
+     '<path fill="currentColor" stroke="none" d="m12 2 2.9',
+     '<path fill="currentColor" d="m12 2 2.9',
+     "both filled and stroked"),
+    ("в одной вкладке два совета с одним глифом", "js/data.js",
+     "{t:'Тёмный шкаф, не полка у плиты',d:'Свет и тепло забирают эфирные масла. В закрытом шкафу молотые специи держат аромат заметно дольше.',i:'dark'}",
+     "{t:'Тёмный шкаф, не полка у плиты',d:'Свет и тепло забирают эфирные масла. В закрытом шкафу молотые специи держат аромат заметно дольше.',i:'clock'}",
+     "reusing one glyph for two tips"),
 ]
 
 state = snapshot()

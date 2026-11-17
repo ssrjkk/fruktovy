@@ -1,5 +1,5 @@
 /* Офлайн-кэш. Версию проставляет сборка на каждом деплое — вручную менять не нужно. */
-var VERSION = "fd-20261114-124952";
+var VERSION = "fd-20261117-203519";
 var CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./assets/fonts.css",
   "./js/data.js", "./js/main.js", "./assets/logo.svg", "./manifest.webmanifest",
   "./assets/icon-192.png", "./assets/icon-512.png",
