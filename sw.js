@@ -1,7 +1,7 @@
 /* Офлайн-кэш. Версию проставляет сборка на каждом деплое — вручную менять не нужно. */
 var VERSION = "fd-20261117-203519";
-var CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./assets/fonts.css",
-  "./js/data.js", "./js/main.js", "./assets/logo.svg", "./manifest.webmanifest",
+var CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./css/themes.css", "./assets/fonts.css",
+  "./js/data.js", "./js/main.js", "./js/theme.js", "./assets/logo.svg", "./manifest.webmanifest",
   "./assets/icon-192.png", "./assets/icon-512.png",
   "./vendor/swiper-bundle.min.css", "./vendor/swiper-bundle.min.js",
   "./vendor/lenis.min.js", "./vendor/gsap.min.js", "./vendor/ScrollTrigger.min.js"];

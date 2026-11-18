@@ -2,14 +2,38 @@
 """Доказательство, что каждый новый гейт tools/check.py кусается: мутируем файл,
 запускаем гейт, требуем конкретную ошибку, восстанавливаем байты из git."""
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
-FILES = ["index.html", "sw.js", "css/style.css", "assets/og.png", "js/data.js", "js/main.js"]
+FILES = ["index.html", "sw.js", "css/style.css", "css/themes.css", "js/theme.js",
+         "assets/og.png", "assets/icon-512.png", "js/data.js", "js/main.js"]
+# Если прогон убили посреди мутации, дерево остаётся испорченным и следующий
+# check.py валится на чужом изменении. Снимок лежит вне репозитория и вычищается
+# при следующем старте.
+JDIR = Path(tempfile.gettempdir()) / "frukti_gate_snapshot"
+
+
+def _jpath(f):
+    return JDIR / f.replace("/", "__")
+
+
+def recover():
+    if not JDIR.is_dir():
+        return
+    for f in FILES:
+        jp = _jpath(f)
+        if not jp.exists():
+            continue
+        cur = (ROOT / f).read_bytes() if (ROOT / f).exists() else None
+        if cur != jp.read_bytes():
+            _io((ROOT / f).write_bytes, jp.read_bytes())
+            print("РЕКАВЕРИ: восстановлен обрывок прошлого прогона -> " + f, flush=True)
 
 
 def _io(fn, *a, **kw):
@@ -23,7 +47,13 @@ def _io(fn, *a, **kw):
 
 
 def snapshot():
-    return {f: _io((ROOT / f).read_bytes) for f in FILES}
+    JDIR.mkdir(parents=True, exist_ok=True)
+    st = {}
+    for f in FILES:
+        b = _io((ROOT / f).read_bytes)
+        _io(_jpath(f).write_bytes, b)
+        st[f] = b
+    return st
 
 
 def restore(state):
@@ -81,8 +111,7 @@ CASES = [
      "undeclared third-party embed hosts"),
     ("оболочка офлайна неполная", "sw.js", '"./js/data.js", ', "",
      "offline shell incomplete"),
-    ("в precache тащатся тяжёлые ассеты", "sw.js", '"./assets/icon-512.png",',
-     '"./assets/icon-512.png", "./assets/img/1002778-1500x1000.jpg",',
+    ("в precache тащатся тяжёлые ассеты", "assets/icon-512.png", 300_000, None,
      "display-only bulk"),
     ("og.png раздулся", "assets/og.png", 300_000, None, "260 KB"),
     ("печать: карточки рвёт по страницам", "css/style.css", "break-inside:avoid", "",
@@ -247,8 +276,161 @@ CASES = [
      "{t:'Тёмный шкаф, не полка у плиты',d:'Свет и тепло забирают эфирные масла. В закрытом шкафу молотые специи держат аромат заметно дольше.',i:'dark'}",
      "{t:'Тёмный шкаф, не полка у плиты',d:'Свет и тепло забирают эфирные масла. В закрытом шкафу молотые специи держат аромат заметно дольше.',i:'clock'}",
      "reusing one glyph for two tips"),
+    # --- темы: переключатель и слой market ---
+    ("тема market забыла цвет палитры", "css/themes.css",
+     "--quince-hi:#ffe08a;", "",
+     "не переопределяет цвета базовой палитры"),
+    ("токен темы стал не-hex", "css/themes.css",
+     "--parch:#cbb08a;", "--parch:#cbb08aa;",
+     "не 6-ричный hex"),
+    ("слой целился в несуществующий класс", "css/themes.css",
+     "[data-theme=market] .panel", "[data-theme=market] .panelz",
+     "нацелена на классы, которых нет в разметке"),
+    ("контраст market поплыл на крафте", "css/themes.css",
+     "--persimmon-d:#6c200c;", "--persimmon-d:#b06a4a;",
+     "contrast market accent link"),
+    ("акцент базовой темы проиграл зерну бумаги", "css/style.css",
+     "--persimmon-d:#aa4316;", "--persimmon-d:#b8481b;",
+     "contrast accent label on grained paper"),
+    ("акцент market проиграл зерну доски", "css/themes.css",
+     "--persimmon-d:#6c200c;", "--persimmon-d:#7a2410;",
+     "contrast market accent label on grained kraft"),
+    ("блик бейджа снова светлее 0.20", "css/style.css",
+     "rgba(255,255,255,.16)", "rgba(255,255,255,.45)",
+     "блик бейджа"),
+    ("правило блика бейджа пропало", "css/style.css",
+     ".p-badge::after{", ".p-badge2::after{",
+     "блик .p-badge::after не найден"),
+    # --- шапка market: тёмная доска, и любой предмет на ней без перекраски исчезает ---
+    ("логотип в шапке market стал тёмным", "css/themes.css",
+     "[data-theme=market] .site-head .logo-text{color:var(--parch)}",
+     "[data-theme=market] .site-head .logo-text{color:var(--fig)}",
+     "шапка market: «надпись логотипа» больше не ссылается"),
+    ("правило логотипа в шапке market пропало", "css/themes.css",
+     "[data-theme=market] .site-head .logo-text{",
+     "[data-theme=market] .site-head2 .logo-text{",
+     "шапка market: правило «надпись логотипа» пропало"),
+    ("корзина в шапке market слилась с доской", "css/themes.css",
+     "[data-theme=market] .cart-btn{border-color:var(--quince-hi);color:var(--quince-hi)}",
+     "[data-theme=market] .cart-btn{border-color:var(--fig);color:var(--fig)}",
+     "шапка market: «обводка корзины» больше не ссылается"),
+    ("бургер market слился с доской", "css/themes.css",
+     "[data-theme=market] .burger span{background:var(--quince-hi)}",
+     "[data-theme=market] .burger span{background:var(--fig)}",
+     "шапка market: «полоски бургера» больше не ссылается"),
+    ("точка статуса market проиграла бумажной этикетке", "css/themes.css",
+     "--ok:#2f6f38;", "--ok:#9ed3a8;",
+     "contrast market status dot open"),
+    ("этикетка часов market ушла с бумаги на крафт", "css/themes.css",
+     "[data-theme=market] .head-live{background:var(--surface)",
+     "[data-theme=market] .head-live{background:var(--parch)",
+     "«этикетка часов» больше не ссылается на var(--surface)"),
+    ("защита ссылок market шире реального брейкпоинта", "css/themes.css",
+     "@media(min-width:769px){[data-theme=market] .nav a{color:var(--parch)}}",
+     "@media(min-width:1101px){[data-theme=market] .nav a{color:var(--parch)}}",
+     "ссылки market должны быть защищены @media(min-width:769px)"),
+    ("брейкпоинт панели навигации перестал находиться", "css/style.css",
+     ".nav{position:fixed", ".navxx{position:fixed",
+     "не нашли, на какой ширине .nav уходит в панель"),
+    ("в переключателе осталась одна тема", "index.html",
+     '<button type="button" data-theme-set="parchment" aria-pressed="true">Пергамент</button>',
+     "",
+     "переключатель тем предлагает"),
+    ("подпись у переключателя потеряла выбор", "index.html",
+     "Два варианта одного сайта. Какую тему согласуете — ту и оставим.",
+     "Тема оформления страницы.",
+     "не обещает заказчику выбор темы"),
+    ("theme.js отложили — вспышка темы", "index.html",
+     '<script src="js/theme.js"></script>',
+     '<script defer src="js/theme.js"></script>',
+     "будет вспышка базовой темы"),
+    ("theme.js уехал после стилей", "index.html",
+     '<script src="js/theme.js"></script>\n<link rel="stylesheet" href="vendor/swiper-bundle.min.css">',
+     '<link rel="stylesheet" href="vendor/swiper-bundle.min.css">\n<script src="js/theme.js"></script>',
+     "атрибут темы встанет поздно"),
+    ("с <html> сняли дефолтную тему", "index.html",
+     '<html lang="ru" data-theme="parchment">', '<html lang="ru">',
+     "нет дефолтного data-theme"),
+    ("main.js перестал сохранять тему", "js/main.js",
+     "if(persist)writeLS(THEME_KEY,name)", "if(persist)writeLS(name,name)",
+     "нет writeLS(THEME_KEY"),
+    ("обработчик темы уехал из IIFE", "js/main.js",
+     "$$('[data-theme-set]').forEach(function(b){b.addEventListener('click',function(){setTheme(b.getAttribute('data-theme-set'),true);});});\n"
+     "setTheme(document.documentElement.getAttribute('data-theme'),false);})();",
+     "})();\n"
+     "$$('[data-theme-set]').forEach(function(b){b.addEventListener('click',function(){setTheme(b.getAttribute('data-theme-set'),true);});});\n"
+     "setTheme(document.documentElement.getAttribute('data-theme'),false);",
+     "вне IIFE"),
+    ("переключатель полез на печать", "css/themes.css",
+     "@media print{.theme-switch{display:none!important}}", "@media print{.ts-note{display:none!important}}",
+     "попадёт на печать"),
+    ("themes.css выпал из прекеша", "sw.js",
+     '"./css/style.css", "./css/themes.css",', '"./css/style.css",',
+     "not precached"),
+    ("заголовок market просит несамохостed шрифт", "css/themes.css",
+     '--display:"Oswald"', '--display:"Playfair Display"',
+     "не самохостed"),
+    # --- кольцо фокуса: обрезка рельсами, вписанные кольца, светлое на тёмном ---
+    ("кольцо обрежет фильтр: у рельса нет запаса", "css/style.css",
+     ".pills{padding:7px;margin:-7px}", ".pills{padding-bottom:3px;margin:0}",
+     "обрежется в .pills"),
+    ("кольцо обрежет ряд месяцев", "css/style.css",
+     ".months{padding:7px;margin:-7px -7px 17px}", ".months{padding-bottom:6px;margin-bottom:24px}",
+     "обрежется в .months"),
+    ("кольцо обрежет галерею: .gal перестал выступать наружу", "css/style.css",
+     ".gal{margin:-7px}", ".gal{margin:0}", "обрежет .gal"),
+    ("плитки галереи уехали вместе с кольцом", "css/style.css",
+     ".gal .swiper-wrapper,html.swiper-on .gal .swiper-wrapper{padding:7px}",
+     ".gal .swiper-wrapper{padding:7px}",
+     "обрежется в .gal .swiper-wrapper"),
+    # Тот же дефект, собранный каскадом: правило с большей специфичностью возвращает
+    # padding-bottom:0, текст запаса на месте — гейт обязан увидеть провал по победившему
+    # объявлению, а не по наличию строки. (3 класса + 2 элемента = 32 против 31 у строки
+    # запаса; цепочка матчера при этом остаётся той же, так что прятаться не за что.)
+    ("каскад срезал кольцо плиток, оставив запас в тексте", "css/style.css",
+     ".gal .swiper-wrapper,html.swiper-on .gal .swiper-wrapper{padding:7px}",
+     ".gal .swiper-wrapper,html.swiper-on .gal .swiper-wrapper{padding:7px}"
+     "html.swiper-on body .gal .swiper-wrapper{padding-bottom:0}",
+     "обрежется в .gal .swiper-wrapper"),
+    ("кольцо миниатюр лайтбокса обрезано", "css/style.css",
+     ".lb-thumbs{padding:10px 7px 9px;margin:0 -7px}", ".lb-thumbs{padding:10px 0 2px;margin:0}",
+     "обрежется в .lb-thumbs"),
+    ("счётчик: кольцо снова рисуется снаружи обрезающего пилюли", "css/style.css",
+     ".step button:focus-visible{outline-offset:-3px;border-radius:99px}",
+     ".step button:focus-visible{border-radius:99px}", "фокус-кольцо .step button"),
+    ("FAQ: кольцо строки вылезло за details с overflow:hidden", "css/style.css",
+     ".faq summary:focus-visible{outline-offset:-3px;border-radius:12px}",
+     ".faq summary:focus-visible{border-radius:12px}", "фокус-кольцо .faq summary"),
+    ("skip-ссылка: кольцо уехало за край документа", "css/style.css",
+     ".skip:focus-visible{outline-offset:-3px;border-radius:0 0 10px 10px}",
+     ".skip:focus-visible{border-radius:0 0 10px 10px}", "фокус-кольцо .skip"),
+    ("тап-цель точки пагинации снова 9px", "css/style.css",
+     ".gal-dots .swiper-pagination-bullet{width:24px;height:24px;",
+     ".gal-dots .swiper-pagination-bullet{width:9px;height:9px;",
+     "тап-цель точки пагинации меньше 24px"),
+    ("точка пагинации стала серым квадратом 24px", "css/style.css",
+     ".gal-dots .swiper-pagination-bullet::before{content:\"\";position:absolute;inset:7px;border-radius:50%;background:var(--fig)",
+     ".gal-dots .swiper-pagination-bullet::before{content:\"\";position:absolute;inset:7px;border-radius:50%;background:none",
+     "потеряла кружок"),
+    ("подвал потерял светлое кольцо", "css/style.css",
+     ".site-foot :focus-visible,#lightbox :focus-visible,", "#lightbox :focus-visible,",
+     "dark surfaces without the light focus ring"),
+    ("лайтбокс потерял светлое кольцо", "css/style.css",
+     "#lightbox :focus-visible,.skip:focus-visible", ".skip:focus-visible",
+     "dark surfaces without the light focus ring"),
+    # Бургер снимаем с группы ВЦЕЛОМ (класс остаётся живым): замена класса на burgerx
+    # ломала сразу два гейта — и про классы разметки, и про кольцо, — и в отчёте стоял
+    # не тот дефект. Мутация обязана менять только то, что проверяет assertion.
+    ("доска бара market: бургер снова с тёмным кольцом", "css/themes.css",
+     "[data-theme=market] .site-head .burger:focus-visible,\n", "",
+     "предметы бара без светлого фокус-кольца"),
+    ("светлое кольцо ссылок menus сошло с медиа-страха бара", "css/themes.css",
+     "@media(min-width:769px){[data-theme=market] .nav a:focus-visible{outline-color:var(--ring-dark)}}",
+     "[data-theme=market] .nav a:focus-visible{outline-color:var(--ring-dark)}",
+     "обязано светлеть только в баре"),
 ]
 
+recover()
 state = snapshot()
 fails = []
 try:
@@ -259,7 +441,7 @@ try:
             mutate(target, a, b)
         rc, out = run_gate()
         ok = rc == 1 and want in out
-        print(("BITES  " if ok else "WEAK   ") + name + f"  (rc={rc}, want={want!r})")
+        print(("BITES  " if ok else "WEAK   ") + name + f"  (rc={rc}, want={want!r})", flush=True)
         if not ok:
             fails.append((name, out.strip().splitlines()[:6]))
         restore(state)
@@ -272,4 +454,5 @@ for name, det in fails:
     print("---- " + name)
     for line in det:
         print("   " + line)
+shutil.rmtree(JDIR, ignore_errors=True)
 sys.exit(1 if fails or rc != 0 else 0)

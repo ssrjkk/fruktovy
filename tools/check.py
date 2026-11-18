@@ -52,7 +52,7 @@ cat = json.loads(re.search(r'id="ld-catalog">(.*?)</script>', html, re.S).group(
 if not SKIP and len(cat.get("itemListElement", [])) != len(data["PRODUCTS"]): ERR.append("ld-catalog not injected")
 
 json.loads((ROOT / "manifest.webmanifest").read_text(encoding="utf-8"))
-for cssp in (ROOT / "css" / "style.css", ROOT / "assets" / "fonts.css"):
+for cssp in sorted((ROOT / "css").glob("*.css")) + [ROOT / "assets" / "fonts.css"]:
     if not cssp.exists():
         if not SKIP: ERR.append("missing " + str(cssp))
         continue
@@ -61,6 +61,21 @@ for cssp in (ROOT / "css" / "style.css", ROOT / "assets" / "fonts.css"):
     for u in re.findall(r'url\("([^"]+)"\)', css):
         if u.startswith("data:"): continue
         if not (cssp.parent / u).resolve().exists() and not SKIP: ERR.append("css url " + u)
+
+# Кавычка в стеке шрифтов, которой нет в assets/fonts.css, в проде молча
+# подменяется системной гарнитурой: метрики плывут, а в браузере всё «нормально».
+SYS_FACES = {"Arial Narrow", "Roboto Condensed", "Liberation Sans Narrow",
+             "Franklin Gothic Medium", "Segoe UI", "Times New Roman", "Noto Sans"}
+_fonts = ROOT / "assets" / "fonts.css"
+if _fonts.exists():
+    hosted = set(re.findall(r'font-family:"([^"]+)"', _fonts.read_text(encoding="utf-8")))
+    used = set()
+    decl = re.compile(r'(?:font-family|--[\w-]*(?:font|display|body|heading)[\w-]*)\s*:\s*([^;}]+)')
+    for cssp in sorted((ROOT / "css").glob("*.css")):
+        for value in decl.findall(cssp.read_text(encoding="utf-8")):
+            used |= set(re.findall(r'"([^"]+)"', value))
+    for fam in sorted(used - SYS_FACES - hosted):
+        ERR.append(f"шрифт {fam} используется в CSS, но не самохостed в assets/fonts.css")
 
 try:
     import esprima
@@ -421,10 +436,25 @@ PAIRS = [
     ("muted body copy", "--muted", "--parch", [], 4.5),
     ("muted copy on surface", "--muted", "--surface", [], 4.5),
     ("accent link on paper", "--persimmon-d", "--parch", [], 4.5),
+    # По замерам с реальных пикселей зерно и виньетка съедают светимость бумаги:
+    # подпись .overline лежит на #f1e8da, а не на токене --parch.
+    ("accent label on grained paper", "--persimmon-d", "#f1e8da", [], 4.5),
     ("footer links", "#e6dcd3", "--fig", [], 4.5),
     ("primary button label", "#2b1a06", "--persimmon", [], 4.5),
     ("whatsapp button label", "#062718", "#22c55e", [], 4.5),
 ]
+
+# Блик на бейдже — прозрачный белый слой поверх подписи. Считаем его по тому же
+# alpha, что лежит в CSS, иначе гейт расходится с картинкой.
+_sheen = re.search(r"\.p-badge::after\{[^}]*rgba\(255,\s*255,\s*255,\s*([.\d]+)\)", CSS_MAIN)
+if not _sheen:
+    SHEEN = 0.0
+    ERR.append("контракт бейджа: блик .p-badge::after не найден — светлую полосу над подписью нечем проверить")
+else:
+    SHEEN = float(_sheen.group(1))
+    if SHEEN > 0.20:
+        ERR.append(f"блик бейджа rgba(255,255,255,{SHEEN:g}) светлее 0.20: белая подпись на пике блика уходит под 4.5")
+    PAIRS.append(("badge caption under sheen", "#ffffff", "--beet", [("#ffffff", SHEEN)], 4.5))
 for label, fg, base, over, need in PAIRS:
     rt = ratio(col(fg), fold(base, over))
     if rt < need:
@@ -463,12 +493,12 @@ else:
             ERR.append(f"focus ring thinner than 3px: {fm.group(1)}px")
         if fm.group(2) != "--ring":
             ERR.append("focus ring must use the --ring token, not " + fm.group(2))
-dark_ring = re.search(r"([^{}]*:focus-visible)\{outline-color:var\(--ring-dark\)\}", CSS_MAIN)
-DARK_SCOPES = (".hero", ".promo", ".p-media", ".sec-dark")
+dark_ring = " ".join(re.findall(r"([^{}]*:focus-visible)\{outline-color:var\(--ring-dark\)\}", CSS_MAIN))
+DARK_SCOPES = (".hero", ".promo", ".p-media", ".sec-dark", ".site-foot", "#lightbox")
 if not dark_ring:
     ERR.append("no light focus ring for dark surfaces (outline-color:var(--ring-dark))")
 else:
-    lost = [s for s in DARK_SCOPES if s + " :focus-visible" not in dark_ring.group(1)]
+    lost = [s for s in DARK_SCOPES if s + " :focus-visible" not in dark_ring]
     if lost:
         ERR.append("dark surfaces without the light focus ring: " + repr(lost))
 if not re.search(r"input:focus-visible\{outline:3px solid var\(--ring\)", CSS_MAIN):
@@ -483,6 +513,101 @@ for tok, bgs in (("--ring", (("paper", "--surface"), ("parchment", "--parch"))),
         rt = ratio(col(tok), col(bg))
         if rt < 3.0:
             ERR.append(f"contrast focus ring {tok} on {label}: {rt:.2f} < 3.0 (WCAG 1.4.11)")
+
+# --- Гейт «кольцо доезжает до всех сторон» ------------------------------------
+# Зеркало пиксельной проверки fs_focus3: outline рисуется СНАРУЖИ border-box'а
+# (3px + offset 3px = 6px), а любой ancestor с overflow режет его. Either у
+# клиппера запас под кольцо, либо кольцо вписано внутрь самого элемента.
+def css_last_decl(sel, prop):
+    """Значение свойства из последнего выигрывающего правила (каскад = порядок в файле)."""
+    for body in reversed(re.findall(r"(?<![\w-])" + re.escape(sel) + r"\{([^{}]*)\}", CSS_MAIN)):
+        d = re.search(r"(?:^|;)\s*" + re.escape(prop) + r":([^;]*)", body)
+        if d:
+            return d.group(1).strip()
+    return None
+
+SIDES = ("top", "right", "bottom", "left")
+
+def css_px4(value):
+    # 'padding:0' и 'margin:0 -7px' — те же 0px; без подмены нулевой шортханд более
+    # специфичного правила вообще не доходил до сравнения каскада.
+    v = re.sub(r"(?<![\w.%-])0(?![\w.%])", "0px", value or "")
+    n = [float(x) for x in re.findall(r"(-?[\d.]+)px", v)]
+    if len(n) == 1:
+        n = n * 4
+    elif len(n) == 2:
+        n = [n[0], n[1], n[0], n[1]]
+    elif len(n) == 3:
+        n = [n[0], n[1], n[2], n[1]]
+    return n if len(n) == 4 else []
+
+def css_spec(sel):
+    """Специфичность: id / (классы, атрибуты, псевдоклассы) / элементы."""
+    n_id = len(re.findall(r"#[\w-]+", sel))
+    n_cls = len(re.findall(r"\.[\w-]+|\[[^\]]*\]|:[\w-]+", sel))
+    n_el = len(re.findall(r"(?<![\w.#:-])[a-z][\w-]*", sel))
+    return n_id * 100 + n_cls * 10 + n_el
+
+def css_sides(chain, prop):
+    """{сторона: (ключ, значение)} победившего каскада для элемента, описанного цепью
+    chain ('.gal .swiper-wrapper'). Победитель — (специфичность, порядок в файле), а не
+    порядок сам по себе: иначе правило html.swiper-on .gal .swiper-wrapper{padding-bottom:0}
+    обходит запись .gal .swiper-wrapper{padding:7px} в браузере, а гейт про это молчит —
+    ровно та ловушка, что срезала кольцо плиток галереи снизу (замер фокуса, 390/1440)."""
+    eff = {}
+    def win(side, key, val):
+        prev = eff.get(side)
+        if prev is None or key > prev[0]:
+            eff[side] = (key, val)
+    for ri, m in enumerate(re.finditer(r"([^{}]+)\{([^{}]*)\}", CSS_MAIN)):
+        sels, body = m.group(1), m.group(2)
+        if sels.lstrip().startswith("@"):
+            continue
+        for s in (" ".join(x.split()) for x in sels.split(",")):
+            if s != chain and not s.endswith(" " + chain):
+                continue
+            key = (css_spec(s), ri)
+            decls = dict(re.findall(r"([a-z-]+)\s*:\s*([^;]*)", body))
+            if prop in decls:
+                n = css_px4(decls[prop])
+                if len(n) == 4:
+                    for side, v in zip(SIDES, n):
+                        win(side, key, v)
+            for side in SIDES:
+                v = decls.get(prop + "-" + side)
+                if v is not None:
+                    n = css_px4(v)
+                    win(side, key, n[0] if n else 0.0)
+    return eff
+
+def css_side_span(chain, prop):
+    """Четыре победившие стороны или None, если каскад закрывает не всё."""
+    eff = css_sides(chain, prop)
+    return [eff[s][1] for s in SIDES] if len(eff) == 4 else None
+
+# Скролл-рельсы режут по padding-боксу: 6px запаса обязано остаться на каждой из четырёх
+# сторон ПОСЛЕ каскада — иначе кольцо режет правило, которого гейт не видел.
+for chain, why in ((".pills", "ряд фильтров"), (".months", "ряд месяцев"),
+                   (".lb-thumbs", "миниатюры лайтбокса"), (".gal .swiper-wrapper", "плитки галереи")):
+    sides = css_side_span(chain, "padding")
+    if sides is None or min(sides) < 6:
+        ERR.append(f"фокус-кольцо обрежется в {chain} ({why}): запас по худшей стороне {None if sides is None else min(sides)}px, нужно >=6px")
+# Галерея: .gal не скроллится, но режет по своему боксу — клиппинг расширяем маргином
+# наружу, а плитки держим на прежних координатах padding'ом внутреннего wrapper.
+gal_m = css_side_span(".gal", "margin")
+if gal_m is None or max(gal_m) > -6:
+    ERR.append(f"фокус-кольцо плитки обрежет .gal: margin по лучшей стороне {None if gal_m is None else max(gal_m)}px, нужно <=-6px")
+# Кольцо прижатому к краю контейнера элементу рисуем ВНУТРИ border-box'а.
+for sel, why in ((".step button", "счётчик"), (".faq summary", "строка FAQ"), (".skip", "skip-ссылка")):
+    off = css_last_decl(sel + ":focus-visible", "outline-offset")
+    if not off or not off.startswith("-"):
+        ERR.append(f"фокус-кольцо {sel} ({why}) обязано быть вписанным (outline-offset отрицательный), сейчас {off!r}")
+# Тап-цель точки пагинации галереи: WCAG 2.5.8 требует не меньше 24×24 CSS px.
+bw, bh = css_last_decl(".gal-dots .swiper-pagination-bullet", "width"), css_last_decl(".gal-dots .swiper-pagination-bullet", "height")
+if not bw or not bh or float(re.sub(r"[^\d.]", "", bw) or 0) < 24 or float(re.sub(r"[^\d.]", "", bh) or 0) < 24:
+    ERR.append(f"тап-цель точки пагинации меньше 24px: {bw}×{bh} (WCAG 2.5.8)")
+if not re.search(r"\.gal-dots \.swiper-pagination-bullet::before\{[^}]*background:var\(--fig\)", CSS_MAIN):
+    ERR.append("точка пагинации потеряла кружок на ::before: 24px бокс станет серым квадратом")
 
 # --- Гейт геометрии иконок ---------------------------------------------------
 # Пороги сняты с замера живых пикселей (headless Chrome, растер 16/20 px) и
@@ -565,6 +690,169 @@ for i, a in enumerate(ids):
             twins.append((round(v, 3), a, b))
 for v, a, b in sorted(twins, reverse=True):
     ERR.append(f"icons {a}/{b} are the same silhouette (IoU {v} > {IOU_CAP})")
+
+# ---- Темы: переключатель, слой второй темы, контраст обеих палитр ----
+TCSS = ROOT / "css" / "themes.css"
+THEME_KEY = "fd.theme.v1"
+if not TCSS.exists():
+    ERR.append("нет css/themes.css: второй теме негде жить")
+else:
+    tcss = TCSS.read_text(encoding="utf-8")
+    mm = re.search(r"\[data-theme=market\]\s*\{([^}]*)\}", tcss)
+    if not mm:
+        ERR.append("тема market не объявлена блоком [data-theme=market]{…}")
+        MVARS = {}
+    else:
+        blk = mm.group(1)
+        MVARS = dict(re.findall(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{6})\b", blk))
+        missed = sorted(set(VARS) - set(MVARS))
+        if missed:
+            ERR.append("тема market не переопределяет цвета базовой палитры: " + repr(missed[:8]))
+        raw = dict(re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", blk))
+        sloppy = sorted(t for t in set(VARS) & set(raw) if not re.fullmatch(r"#[0-9a-fA-F]{6}", raw[t].strip()))
+        if sloppy:
+            ERR.append("в теме market токен(ы) не 6-ричный hex: " + repr(sloppy[:8]))
+        # Мёртвые селекторы слоя: класс обязан жить в разметке или в базовом CSS.
+        src_all = html + CSS_MAIN + (ROOT / "js" / "main.js").read_text(encoding="utf-8")
+        dead = sorted({c for sel in re.findall(r"(\[data-theme=market\][^{}]*)\{", tcss)
+                       for c in re.findall(r"\.([A-Za-z][\w-]*)", sel)
+                       if not re.search(r"[\"'\s.:-]" + re.escape(c) + r"\b", src_all)})
+        if dead:
+            ERR.append("тема market нацелена на классы, которых нет в разметке: " + repr(dead[:8]))
+
+    # Кольцо фокуса на тёмной доске бара: базовый --ring #7a2410 даёт на ней 1.7:1 (замер
+    # fs_focus3), поэтому светлое кольцо обязаны получать предметы бара. Мобильная .nav —
+    # бумажная панель, на ней верен базовый --ring, и ловить её в этом правиле нельзя.
+    bar_ring = " ".join(re.findall(r"([^{}]*:focus-visible)\{outline-color:var\(--ring-dark\)\}", tcss))
+    lost_bar = [s for s in (".site-head .logo", ".site-head .cart-btn", ".site-head .burger", ".site-head .head-call")
+                if "[data-theme=market] " + s not in bar_ring]
+    if lost_bar:
+        ERR.append("тема market: предметы бара без светлого фокус-кольца: " + repr(lost_bar))
+    # Ссылки меню светлеют кольцом только в баре (>=769px). Ниже — бумажная панель, и там
+    # кремовое кольцо на кремовом фоне исчезает, поэтому правило обязано жить под медиа-страхом.
+    flat = re.sub(r"\s+", "", tcss)
+    if "@media(min-width:769px){[data-theme=market].nava:focus-visible{outline-color:var(--ring-dark)}}" not in flat:
+        ERR.append("тема market: кольцо ссылок .nav обязано светлеть только в баре (media min-width:769px)")
+    if flat.count("[data-theme=market].nava:focus-visible{outline-color:var(--ring-dark)}") > 1:
+        ERR.append("тема market: второе светлое кольцо для .nav — на бумажной панели оно невидимо")
+
+    # Контракт второй палитры — те же поверхности, что и в базовой таблице.
+    # Бар шапки в market — доска rgba(36,23,8,.86); по замеру пикселей светимость
+    # полосы даёт #2a1b0d, а не плоский --fig, поэтому считаем от замера.
+    BAR_MKT = "#2a1b0d"
+    PAIRS_MARKET = [
+        ("header brand on the board", "--parch", BAR_MKT, [], 3.0),
+        ("header nav on the board", "--parch", BAR_MKT, [], 4.5),
+        ("header cart icon on the board", "--quince-hi", BAR_MKT, [], 4.5),
+        ("header burger on the board", "--quince-hi", BAR_MKT, [], 3.0),
+        ("header CTA label on the board", "--parch", BAR_MKT, [], 4.5),
+        ("status label on its paper tag", "--fig", "--surface", [], 4.5),
+        ("status dot open", "--ok", "--surface", [], 3.0),
+        ("status dot shut", "--danger", "--surface", [], 3.0),
+        ("badge caption", "#ffffff", "--persimmon-d", [], 4.5),
+        ("promo heading", "--quince-hi", "--leaf-d", [("--persimmon", 0.34)], 3.0),
+        ("promo body", "#e7dcc9", "--leaf-d", [("--persimmon", 0.34)], 4.5),
+        ("active chip ink", "--chip-ink", "--fig2", [], 4.5),
+        ("muted body on kraft", "--muted", "--parch", [], 4.5),
+        ("accent link on kraft", "--persimmon-d", "--parch", [], 4.5),
+        # Тот же поправочный замер, но на крафте: текстура доски темнее токена.
+        ("accent label on grained kraft", "--persimmon-d", "#c0a682", [], 4.5),
+        ("badge caption under sheen", "#ffffff", "--persimmon-d", [("#ffffff", SHEEN)], 4.5),
+        ("primary button label", "#1c1004", "--persimmon", [], 4.5),
+        ("hero text on wood", "#f4e8d6", "--fig2", [], 4.5),
+        ("footer link", "#eadfce", "--fig", [], 4.5),
+        ("estimate value", "--quince-l", "--fig2", [], 3.0),
+        ("switcher caption", "#dccbb6", "--fig2", [], 4.5),
+    ]
+    if MVARS:
+        _saved = dict(VARS)
+        VARS.update(MVARS)
+        for label, fg, base, over, need in PAIRS_MARKET:
+            rt = ratio(col(fg), fold(base, over))
+            if rt < need:
+                ERR.append(f"contrast market {label}: {rt:.2f} < {need}")
+        VARS.clear(); VARS.update(_saved)
+
+    # Правила шапки market: бар — тёмная доска, поэтому каждый предмет на баре
+    # обязан быть перекрашен явно. Иначе шапка сливается с доской (контраст 1.0),
+    # и по одним токенам этого не увидеть.
+    HEAD_MKT = [
+        (r"\[data-theme=market\] \.site-head \.logo-text\{([^}]*)\}", "var(--parch)", "надпись логотипа"),
+        (r"\[data-theme=market\] \.head-live\{([^}]*)\}", "var(--surface)", "этикетка часов"),
+        (r"\[data-theme=market\] \.cart-btn\{([^}]*)\}", "var(--quince-hi)", "обводка корзины"),
+        (r"\[data-theme=market\] \.burger span\{([^}]*)\}", "var(--quince-hi)", "полоски бургера"),
+    ]
+    for pat, needle, label in HEAD_MKT:
+        hm = re.search(pat, tcss)
+        if not hm:
+            ERR.append(f"шапка market: правило «{label}» пропало — на тёмной доске предмет станет невидим")
+        elif needle not in hm.group(1):
+            ERR.append(f"шапка market: «{label}» больше не ссылается на {needle}")
+
+    # Навигация прячется в светлую панель на брейкпоинте базовой темы. Если защита
+    # стоит шире, на планшете ссылки останутся тёмными на тёмном баре.
+    def _block(css, brace_pos):
+        depth = 0
+        for k in range(brace_pos, len(css)):
+            if css[k] == "{":
+                depth += 1
+            elif css[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return css[brace_pos:k + 1]
+        return ""
+
+    nav_bp = next((int(m.group(1)) for m in re.finditer(r"@media\(max-width:(\d+)px\)\{", CSS_MAIN)
+                   if ".nav{position:fixed" in _block(CSS_MAIN, m.end() - 1)), None)
+    if nav_bp is None:
+        ERR.append("не нашли, на какой ширине .nav уходит в панель — гейт ссылок market слепой")
+    elif not re.search(r"@media\(min-width:%dpx\)\{\s*\[data-theme=market\] \.nav a\{[^}]*var\(--parch\)" % (nav_bp + 1), tcss):
+        ERR.append(f"ссылки market должны быть защищены @media(min-width:{nav_bp + 1}px): ниже "
+                   f"{nav_bp}px навигация живёт в светлой панели и просит базовые чернила")
+
+    # Контракт переключателя.
+    if 'data-theme="parchment"' not in html:
+        ERR.append("на <html> нет дефолтного data-theme=parchment")
+    opts = re.findall(r'data-theme-set="([^"]+)"', html)
+    if sorted(set(opts)) != ["market", "parchment"]:
+        ERR.append(f"переключатель тем предлагает {sorted(set(opts))}, ждали market+parchment")
+    if len(opts) != 2:
+        ERR.append(f"кнопок смены темы {len(opts)}, а вариантов два")
+    if html.count('aria-pressed=') < 2 or 'ts-note' not in html:
+        ERR.append("переключатель тем без aria-pressed или без подписи для заказчика")
+    note = re.search(r'class="ts-note">([^<]{6,})<', html)
+    if not note:
+        ERR.append("подпись темы слишком короткая или пропала")
+    elif not re.search(r"(согласу|выбер|остав)", note.group(1), re.I):
+        ERR.append("подпись у переключателя не обещает заказчику выбор темы: " + note.group(1)[:60])
+    tjs = ROOT / "js" / "theme.js"
+    if not tjs.exists():
+        ERR.append("нет js/theme.js: тема встанет только после первой отрисовки")
+    else:
+        tj = tjs.read_text(encoding="utf-8")
+        if THEME_KEY not in tj:
+            ERR.append("js/theme.js не читает " + THEME_KEY)
+        tag = re.search(r'<script[^>]*src="js/theme\.js"[^>]*>', html)
+        if not tag:
+            ERR.append("js/theme.js не подключён")
+        elif re.search(r"defer|async|type=.module", tag.group(0)):
+            ERR.append("js/theme.js отложен — будет вспышка базовой темы")
+        elif tag.start() > html.find('<link rel="stylesheet"'):
+            ERR.append("js/theme.js идёт после стилей — атрибут темы встанет поздно")
+    mj = (ROOT / "js" / "main.js").read_text(encoding="utf-8")
+    if THEME_KEY not in mj:
+        ERR.append("main.js не сохраняет выбор темы в " + THEME_KEY)
+    if not re.search(r"writeLS\(\s*THEME_KEY\s*,", mj):
+        ERR.append("main.js не сохраняет выбор темы: нет writeLS(THEME_KEY, …)")
+    # $$ и writeLS живут внутри IIFE: обработчик снаружи кинет ReferenceError на клике.
+    iife_end = mj.find("})();if('serviceWorker'")
+    bind = mj.find("$$('[data-theme-set]').forEach(function(b){b.addEventListener")
+    if iife_end < 0 or bind < 0 or bind > iife_end:
+        ERR.append("main.js вешает кнопки темы вне IIFE — $$ и writeLS там не видны")
+    if "data-theme-set" not in mj:
+        ERR.append("main.js не вешает обработчик на кнопки темы")
+    if not re.search(r"@media\s+print\s*\{[^}]*\.theme-switch\s*\{[^}]*display\s*:\s*none", tcss):
+        ERR.append("переключатель темы попадёт на печать")
 
 for n in NOTES: print("NOTE:", n)
 if ERR:

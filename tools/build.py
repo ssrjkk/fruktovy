@@ -30,6 +30,13 @@ for w in (600, 700):
         for sub in ("cyrillic", "latin"):
             FONTS_MAP[f"cormorant-garamond-{sub}-{w}-{style}.woff2"] = (
                 "@fontsource/cormorant-garamond", "cormorant-garamond", sub, w, style)
+# Узкий гротеск для заголовков темы market. Без него «Oswald» в --display
+# доезжает только до Windows и Android, а на macOS/iOS заголовки становятся обычным
+# Helvetica — рынок на паллетах теряет свой вид. Вес один: в CSS везде 700.
+for w in (700,):
+    for sub in ("cyrillic", "latin"):
+        FONTS_MAP[f"oswald-{sub}-{w}.woff2"] = ("@fontsource/oswald", "oswald", sub, w, "normal")
+FONT_NAMES = {"manrope": "Manrope", "cormorant-garamond": "Cormorant Garamond", "oswald": "Oswald"}
 RANGES = {
     "cyrillic": "U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116",
     "latin": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2212, U+FEFF, U+FFFD",
@@ -155,7 +162,7 @@ def build_fonts():
         raise SystemExit(f"FONT FAIL: {fails}")
     faces = []
     for local, (pkg, family, sub, w, style) in FONTS_MAP.items():
-        name = "Manrope" if family == "manrope" else "Cormorant Garamond"
+        name = FONT_NAMES[family]
         faces.append(
             f'@font-face{{font-family:"{name}";font-style:{style};font-weight:{w};font-display:swap;'
             f'src:url("fonts/{local}") format("woff2");unicode-range:{RANGES[sub]}}}')
@@ -243,7 +250,7 @@ def finalize(minify=True):
     credits = ["Фото — Pexels (https://www.pexels.com/license/):"]
     credits += [f"  {p['photo']}: https://www.pexels.com/photo/{p['photo']}/" for p in data["PRODUCTS"]]
     credits += [f"  {g['id']}: https://www.pexels.com/photo/{g['id']}/" for g in data["GALLERY"]]
-    credits += ["", "Шрифты — SIL OFL 1.1: Manrope, Cormorant Garamond",
+    credits += ["", f"Шрифты — SIL OFL 1.1: {', '.join(FONT_NAMES.values())}",
                 "Библиотеки (self-hosted): Swiper (MIT), Lenis (MIT), GSAP + ScrollTrigger (GreenSock standard license)",
                 "Иконки — inline SVG-спрайт в index.html",
                 f"QR-код (assets/qr.png) — {SITE_URL}, закодирован напрямую (qrcode, MIT)"]

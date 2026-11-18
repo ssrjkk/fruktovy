@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="parchment">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -26,6 +26,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231b1220'/%3E%3Cpath d='M16 24l6-10 10 7 10-7 6 10z' fill='%23d9a521'/%3E%3Cpath d='M32 30c-3-4-9-4-12 0-4 5-2 14 4 18 4 3 12 3 16 0 6-4 8-13 4-18-3-4-9-4-12 0z' fill='%23e2622c'/%3E%3Cpath d='M36 24c4-3 8-3 10 0-3 3-7 3-10 0z' fill='%233f7d4e'/%3E%3C/svg%3E">
 
+<script src="js/theme.js"></script>
 <link rel="stylesheet" href="vendor/swiper-bundle.min.css">
 <script defer src="vendor/lenis.min.js"></script>
 <script defer src="vendor/gsap.min.js"></script>
@@ -35,6 +36,7 @@
 <script type="application/ld+json" id="ld-catalog">{"@context": "https://schema.org", "@type": "ItemList", "name": "Ассортимент «Фруктового»", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "Яблоки"}, {"@type": "ListItem", "position": 2, "name": "Груши"}, {"@type": "ListItem", "position": 3, "name": "Бананы"}, {"@type": "ListItem", "position": 4, "name": "Апельсины"}, {"@type": "ListItem", "position": 5, "name": "Мандарины"}, {"@type": "ListItem", "position": 6, "name": "Виноград"}, {"@type": "ListItem", "position": 7, "name": "Лимоны"}, {"@type": "ListItem", "position": 8, "name": "Помидоры"}, {"@type": "ListItem", "position": 9, "name": "Огурцы"}, {"@type": "ListItem", "position": 10, "name": "Перец сладкий"}, {"@type": "ListItem", "position": 11, "name": "Картофель"}, {"@type": "ListItem", "position": 12, "name": "Морковь"}, {"@type": "ListItem", "position": 13, "name": "Лук репчатый"}, {"@type": "ListItem", "position": 14, "name": "Грецкий орех"}, {"@type": "ListItem", "position": 15, "name": "Миндаль"}, {"@type": "ListItem", "position": 16, "name": "Фундук"}, {"@type": "ListItem", "position": 17, "name": "Семечки"}, {"@type": "ListItem", "position": 18, "name": "Курага"}, {"@type": "ListItem", "position": 19, "name": "Изюм"}, {"@type": "ListItem", "position": 20, "name": "Чернослив"}, {"@type": "ListItem", "position": 21, "name": "Финики"}, {"@type": "ListItem", "position": 22, "name": "Чурчхела"}, {"@type": "ListItem", "position": 23, "name": "Восточные сладости"}, {"@type": "ListItem", "position": 24, "name": "Специи на развес"}, {"@type": "ListItem", "position": 25, "name": "Сушёные травы"}]}</script>
 <link rel="stylesheet" href="assets/fonts.css">
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/themes.css">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -108,8 +110,9 @@
 <p class="hero-lead reveal" style="--d:2">Соберите список онлайн — заберите в магазине на Сытнинской, 12. Фрукты, овощи, орехи, сухофрукты и специи в восьми минутах от метро «Горьковская». <span class="rotate" id="rotWord">свежесть</span> каждый день.</p>
 <a class="hero-rating reveal" style="--d:3" href="https://yandex.ru/maps/org/fruktovy_dvorets/60838532953/reviews/" target="_blank" rel="noopener"><svg class="ic" aria-hidden="true"><use href="#i-star"/></svg><b>4,7</b> на Яндекс Картах · 39 оценок</a>
 <div class="hero-cta reveal" style="--d:4"><a class="btn btn-primary" href="#catalog"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> Собрать заказ</a><a class="btn btn-wa" data-wa href="https://t.me/ssrjkk"><svg class="ic" aria-hidden="true"><use href="#i-wa"/></svg> WhatsApp</a><a class="btn btn-glass" data-route href="https://yandex.ru/maps/?rtext=~59.957835%2C30.308790&amp;rtt=pd" target="_blank" rel="noopener"><svg class="ic" aria-hidden="true"><use href="#i-nav"/></svg> Как добраться</a></div>
-<ul class="hero-facts reveal" style="--d:5"><li>Сытнинская улица, 12</li><li>Ежедневно 08:00–21:00</li><li>Заказ в WhatsApp — без регистрации</li></ul>
-<div class="hero-ticker reveal" style="--d:6"><b>Сейчас выбирают</b><ul aria-hidden="true"><li>Яблоки · Виноград</li><li>Миндаль · Грецкий орех</li><li>Мандарины · Лимоны</li><li>Морковь · Картофель</li><li>Яблоки · Виноград</li></ul></div>
+<div class="theme-switch reveal" style="--d:5"><span class="ts-name" id="tsName"><svg class="ic" aria-hidden="true"><use href="#i-spark"/></svg> Тема оформления</span><span class="ts-opts"><button type="button" data-theme-set="parchment" aria-pressed="true">Пергамент</button><button type="button" data-theme-set="market" aria-pressed="false">Рынок на паллетах</button></span><span class="ts-note">Два варианта одного сайта. Какую тему согласуете — ту и оставим.</span></div>
+<ul class="hero-facts reveal" style="--d:6"><li>Сытнинская улица, 12</li><li>Ежедневно 08:00–21:00</li><li>Заказ в WhatsApp — без регистрации</li></ul>
+<div class="hero-ticker reveal" style="--d:7"><b>Сейчас выбирают</b><ul aria-hidden="true"><li>Яблоки · Виноград</li><li>Миндаль · Грецкий орех</li><li>Мандарины · Лимоны</li><li>Морковь · Картофель</li><li>Яблоки · Виноград</li></ul></div>
 </div>
 <div class="hero-art reveal" style="--d:2" aria-hidden="true">
 <div class="arch arch-main" data-parallax="-14"><img src="assets/img/1171170-900x1100.jpg" width="900" height="1100" alt="" fetchpriority="high" loading="eager" decoding="async"></div>

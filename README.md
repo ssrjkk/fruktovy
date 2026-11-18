@@ -2,7 +2,7 @@
 
 Одностраничный сайт магазина «Фруктовый» (СПб, Сытнинская ул., 12):
 каталог с поиском и фильтрами, корзина с повтором заказа, конструктор наборов,
-сезонный календарь, галерея с лайтбоксом, заказ через WhatsApp.
+сезонный календарь, галерея с лайтбоксом, две темы оформления, заказ через WhatsApp.
 Чистые HTML/CSS/JS без сборки фреймворков; все ассеты self-hosted, ноль трекеров.
 
 ## Структура
@@ -10,7 +10,9 @@
 ```
 index.html            страница (разметка + inline SVG-спрайт иконок)
 css/style.css         стили (вынесены из страницы, минифицируются сборкой)
+css/themes.css        токены второй темы «Рынок», разметка общая
 js/data.js            данные: магазин, категории, товары, галерея
+js/theme.js           тема до первой отрисовки: localStorage → data-theme
 js/main.js            приложение: корзина, конструктор, сезоны, лайтбокс
 sw.js                 офлайн-кэш (версию проставляет сборка)
 tools/build.py        сборка: vendor, шрифты, фото, og, SEO-каталог, минификация
@@ -43,6 +45,26 @@ python -m http.server 8080   # и открыть http://localhost:8080
 Canonical-адрес: `https://ssrjkk.github.io/fruktovy/`. При подключении своего
 домена заменить адрес в `index.html` (canonical, og:url), `robots.txt`, `sitemap.xml`.
 
+## Темы оформления
+
+Два варианта дизайна одного и того же сайта: переключатель «Тема оформления» в первом
+экране — «Пергамент» и «Рынок на паллетах». Разметка и данные общие, отличаются только
+стили. Выбор хранится в localStorage (`fd.theme.v1`) и восстанавливается до первой
+отрисовки, поэтому вспышки чужой темы при загрузке нет.
+
+- `css/style.css` — базовая тема «Пергамент»; без `themes.css` сайт остаётся рабочим.
+- `css/themes.css` — тема «Рынок на паллетах»: под `[data-theme=market]` переопределены
+  токены (палитра, фактуры дерева) и правила заголовков, шапки, кнопок и карточек;
+  узкий гротеск Oswald держится здесь же. Всё, что вне этого префикса, — базовая тема.
+- `js/theme.js` — читает сохранённый выбор и ставит `data-theme` на `<html>` до CSS;
+  отдельный файл, потому что CSP сайта запрещает инлайновые скрипты.
+- `js/main.js` — `setTheme()` синхронизирует кнопки и `aria-pressed`.
+
+Какую тему согласует заказчик, та и остаётся. Чтобы убрать вторую, достаточно удалить
+`css/themes.css`, `js/theme.js`, блок `.theme-switch` в первом экране, ссылки на оба файла
+в `index.html`, `setTheme` в `js/main.js` и две строки в кэше `sw.js` — базовая тема при этом
+не требует правок.
+
 ## Данные и цены
 
 Цены намеренно `null` («цена по запросу») — продавец подтверждает цену дня в WhatsApp.
@@ -65,7 +87,7 @@ CI соберёт и выложит на Pages. `tools/check.py` не даст �
 
 ## Лицензии ассетов
 
-Фото — Pexels License; шрифты Manrope и Cormorant Garamond — SIL OFL 1.1;
+Фото — Pexels License; шрифты Manrope, Cormorant Garamond и Oswald — SIL OFL 1.1;
 Swiper и Lenis — MIT; GSAP/ScrollTrigger — GreenSock standard license.
 Полный список — `assets/CREDITS.txt` после сборки.
 
@@ -75,6 +97,10 @@ Swiper и Lenis — MIT; GSAP/ScrollTrigger — GreenSock standard license.
 
 Single-page catalog site for a fruit & vegetable shop in Saint Petersburg:
 searchable catalog, WhatsApp ordering, basket builder, seasonal calendar, gallery.
+Two swappable themes (default "Parchment" and "Market") share one markup: everything that
+belongs to the second one sits under the `[data-theme=market]` prefix in `css/themes.css`,
+the choice lives in `localStorage` and is applied before first paint by `js/theme.js` —
+details in «Темы оформления» above.
 Vanilla HTML/CSS/JS, all assets self-hosted, zero trackers. CI (`quality` job) runs a
 secret scan, builds assets (Pexels photos, OFL fonts, MIT vendors), executes cart unit
 tests in a real JS engine and a quality gate, then deploys to GitHub Pages.
