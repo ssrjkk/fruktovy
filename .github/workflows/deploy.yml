@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: secret scan
         env:
           PATTERN: (xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,})
@@ -30,7 +30,7 @@ jobs:
           if [ "$rc" -eq 0 ]; then echo "::error::Potential secret committed"; exit 1; fi
           if [ "$rc" -ne 1 ]; then echo "::error::secret scan failed: git exit $rc"; exit "$rc"; fi
           echo "Secret scan clean"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install deps
@@ -41,8 +41,8 @@ jobs:
         run: python tools/test_cart.py
       - name: Quality gate
         run: python tools/check.py
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: "."
   deploy:
@@ -54,4 +54,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
