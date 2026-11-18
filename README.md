@@ -17,7 +17,8 @@ js/main.js            приложение: корзина, конструкто
 sw.js                 офлайн-кэш (версию проставляет сборка)
 tools/build.py        сборка: vendor, шрифты, фото, og, SEO-каталог, минификация
 tools/test_cart.py    юнит-тесты корзины в quickjs (код вырезается из js/main.js)
-tools/check.py        гейт качества: разметка, JSON-LD, ссылки, иконки, CSP, sitemap
+tools/check.py        гейт качества: разметка, JSON-LD, ссылки, иконки, CSP, sitemap, тап-цели
+tools/gate_bite.py    доказательство, что каждый пункт гейта кусается (мутации файла)
 .github/workflows/deploy.yml  CI: secret scan → сборка → тесты → гейт → Pages
 ```
 

@@ -35,3 +35,21 @@
    overflow'ом пилюли (содержимое 116px в боксе 112px). У́зкие отступы и зазор возвращают
    содержимое внутрь бокса; кегль, высота строки и тап-цель остаются прежними. */
 @media (max-width:380px){.btn-s{padding:9px 11px;gap:6px}}
+/* Тап-цель на сенсоре. Замер headless Chrome на 390×844 с touch-эмуляцией (pointer:coarse
+   совпадает): основными действиями магазина приходится попадать пальцем в боксы 29-41px —
+   «В корзину» 36px, фильтры 39px, кнопки темы 34px, «−»/«+» в корзине 29×29px, ссылки в
+   подвале 26px. WCAG 2.5.8 (AA, 24px) они проходили, но для пальца принят 44px (2.5.5,
+   HIG/Material), поэтому на сенсоре поднимаем до 44. Мышь и тачпад блок не трогает —
+   компактная вёрстка остаётся. Где бокс раздвигать нельзя (иконка поверх фото, крестик
+   поля и диалога), зона клика растёт псевдоэлементом: тот же приём, что у .rail a и у
+   точек пагинации галереи. */
+@media (pointer:coarse){
+.pill,.p-add,.btn-s,.hero-rating{min-height:44px}
+.tab,.seg button{display:flex;align-items:center;justify-content:center;min-height:44px}
+.step button,.step.mini button{width:44px;height:44px}
+.foot-col a{display:flex;align-items:center;min-height:44px}
+.p-fav::before{content:"";position:absolute;inset:-5px;border-radius:50%}
+.close-x{position:relative}
+.close-x::before{content:"";position:absolute;inset:-2px;border-radius:50%}
+#searchClear::before{inset:-11px -7px}
+}

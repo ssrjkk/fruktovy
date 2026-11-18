@@ -609,6 +609,97 @@ if not bw or not bh or float(re.sub(r"[^\d.]", "", bw) or 0) < 24 or float(re.su
 if not re.search(r"\.gal-dots \.swiper-pagination-bullet::before\{[^}]*background:var\(--fig\)", CSS_MAIN):
     ERR.append("точка пагинации потеряла кружок на ::before: 24px бокс станет серым квадратом")
 
+# --- Гейт тап-цели 44px на сенсоре ---------------------------------------------
+# Замер headless Chrome на 390×844 с touch-эмуляцией (matchMedia('(pointer: coarse)')
+# в нём true): «В корзину» была 36px, фильтры 39px, кнопки темы 34px, «−»/«+» в
+# корзине 29×29px, ссылки в подвале 26px. WCAG 2.5.8 (24px) они проходили и раньше,
+# но пальцем попадают в эти боксы каждый заказ, поэтому держим планку 2.5.5 (44px).
+# Порог объявлен ТОЛЬКО внутри @media (pointer:coarse) — под мышью и тачпадом
+# вёрстка остаётся компактной. Значит и гейт обязан читать этот блок, а не файл
+# целиком: то же правило вне блока означало бы, что кнопки выросли на десктопе.
+def media_body(text, header):
+    """Тело @media-блока; скобки считаем, потому что минифицированный CSS — одна строка."""
+    i = text.find(header)
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + len(header):j]
+    return None
+
+
+def coarse_of(text):
+    return media_body(text, "@media (pointer:coarse){") or media_body(text, "@media(pointer:coarse){")
+
+
+COARSE = coarse_of(CSS_MAIN)
+if COARSE is None:
+    ERR.append("пропал @media (pointer:coarse): тап-цель 44px на сенсоре нечем проверить")
+    COARSE = ""
+TCH = ROOT / "css" / "themes.css"
+COARSE_T = coarse_of(TCH.read_text(encoding="utf-8")) if TCH.exists() else None
+
+
+def coarse_decl(sel, prop, body=None):
+    """Последнее объявление свойства среди правил блока (селекторы через запятую — поштучно)."""
+    val = None
+    for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", body if body is not None else COARSE):
+        if sel not in [" ".join(s.split()) for s in m.group(1).split(",")]:
+            continue
+        d = re.search(r"(?:^|;)\s*" + re.escape(prop) + r":([^;]*)", m.group(2))
+        if d:
+            val = d.group(1).strip()
+    return val
+
+
+def pxnum(v):
+    n = re.findall(r"(-?[\d.]+)px", v or "")
+    return float(n[0]) if n else None
+
+
+for _sel, _why in ((".pill", "фильтр категории"), (".p-add", "«В корзину» на карточке"),
+                   (".btn-s", "мелкие кнопки в диалогах"), (".hero-rating", "ссылка на рейтинг в hero"),
+                   (".tab", "вкладки советов"), (".seg button", "размер набора в конструкторе"),
+                   (".foot-col a", "ссылки в подвале")):
+    _v = pxnum(coarse_decl(_sel, "min-height"))
+    if _v is None or _v < 44:
+        ERR.append(f"тап-цель {_sel} ({_why}) на сенсоре {coarse_decl(_sel, 'min-height')!r}, нужно min-height>=44px (WCAG 2.5.5)")
+if COARSE_T is None:
+    ERR.append("в css/themes.css нет @media (pointer:coarse): кнопки темы снова 34px под пальцем")
+else:
+    _v = pxnum(coarse_decl(".ts-opts button", "min-height", COARSE_T))
+    if _v is None or _v < 44:
+        ERR.append(f"тап-цель .ts-opts button (переключатель тем) на сенсоре {coarse_decl('.ts-opts button', 'min-height', COARSE_T)!r}, нужно min-height>=44px (WCAG 2.5.5)")
+# Счётчик количества: бокс растит сам грид-кнопке (place-items:center), перерыва с
+# соседним «−»/«+» нет — между центрами 100px, так что зоны не слипаются.
+for _sel in (".step button", ".step.mini button"):
+    _w, _h = pxnum(coarse_decl(_sel, "width")), pxnum(coarse_decl(_sel, "height"))
+    if not _w or not _h or min(_w, _h) < 44:
+        ERR.append(f"счётчик в корзине ({_sel}) на сенсоре {_w}×{_h}px, нужно 44×44 (WCAG 2.5.5)")
+# Иконки, у которых бокс раздвигать нельзя (белое сердце легло бы на фото, круглый
+# крестик — на поле): зона нажатия растёт псевдоэлементом, как у .rail a и точек
+# галереи. Считаем от базового бокса: 34+2*5 и 40+2*2 дают ровно 44.
+for _psel, _bsel, _why in ((".p-fav::before", ".p-fav", "сердечко избранного на карточке"),
+                           (".close-x::before", ".close-x", "крестик диалога")):
+    _base = pxnum(css_last_decl(_bsel, "height"))
+    _ins = pxnum(coarse_decl(_psel, "inset"))
+    if _base is None or _ins is None or _base + 2 * abs(_ins) < 44:
+        ERR.append(f"зона нажатия {_psel} ({_why}): бокс {_base}px + 2*{abs(_ins or 0)}px < 44px на сенсоре")
+if coarse_decl(".close-x", "position") != "relative":
+    ERR.append("крестику диалога сняли position:relative: зона нажатия уедет с кнопки на .cart-head")
+# У крестика поля высоты в CSS нет (22px набираются иконкой 15px + padding 1px — замер
+# 390×844), поэтому базовый бокс здесь константа, а проверка идёт по обеим осям.
+_sc = [abs(float(x)) for x in re.findall(r"(-?[\d.]+)px", coarse_decl("#searchClear::before", "inset") or "")]
+_v = _sc[0] if _sc else 0.0
+_h = _sc[1] if len(_sc) > 1 else _v
+if 22 + 2 * _v < 44 or 32 + 2 * _h < 44:
+    ERR.append(f"зона нажатия #searchClear::before: {22 + 2 * _v:.0f}×{32 + 2 * _h:.0f}px, нужно 44×44 на сенсоре")
+
 # --- Гейт геометрии иконок ---------------------------------------------------
 # Пороги сняты с замера живых пикселей (headless Chrome, растер 16/20 px) и
 # пересчитаны офлайн тем же движком: icon_geom воспроизводит те же числа, поэтому

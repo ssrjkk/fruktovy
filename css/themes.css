@@ -11,6 +11,9 @@
 .ts-opts button[aria-pressed=true]{background:linear-gradient(132deg,var(--quince-l),var(--persimmon));color:#2b1a06}
 .theme-switch .ts-note{font-size:.78rem;line-height:1.45;color:#dccbb6;max-width:24em}
 @media (max-width:720px){.theme-switch{gap:8px}.theme-switch .ts-note{max-width:none;flex:1 0 100%}}
+/* Кнопки темы на сенсоре — 44px: базовый бокс 34px, а рисуется он этим файлом,
+   поэтому порог style.css до сюда не доходит (побеждал бы padding:8px 15px отсюда). */
+@media (pointer:coarse){.ts-opts button{min-height:44px}}
 @media print{.theme-switch{display:none!important}}
 
 /* ---- тема «Рынок на паллетах»: та же сетка токенов, другие цвета и фактуры ---- */
