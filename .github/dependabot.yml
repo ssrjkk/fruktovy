@@ -1,0 +1,28 @@
+version: 2
+# @author ssrjkk | «Фруктовый»
+#
+# Обновлять тут нечего, кроме версий actions: витрина живёт на чистых
+# HTML/CSS/JS, python-зависимости ставятся в CI построчно (pillow, rcssmin,
+# rjsmin, esprima, quickjs, qrcode) и lock-файла у них нет — pip-экосистема
+# dependabot без него падает с «No requirements file». Поэтому экосистема одна.
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    open-pull-requests-limit: 5
+    labels:
+      - 'dependencies'
+      - 'github-actions'
+    commit-message:
+      prefix: 'chore'
+      prefix-development: 'chore'
+      include: 'scope'
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
