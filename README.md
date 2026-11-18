@@ -26,15 +26,22 @@ tools/check.py        гейт качества: разметка, JSON-LD, сс
 ```bash
 python -m venv .venv && . .venv/Scripts/activate   # Windows: .venv\Scripts\activate
 pip install pillow rcssmin rjsmin esprima quickjs qrcode
-python tools/build.py        # фото (Pexels), шрифты (OFL), vendor (MIT/GSAP), QR на сайт
+python tools/build.py --no-minify   # фото (Pexels), шрифты (OFL), vendor (MIT/GSAP), QR на сайт
 python tools/test_cart.py
 python tools/check.py
 python -m http.server 8080   # и открыть http://localhost:8080
 ```
 
-`build.py` идемпотентен; `--no-minify` оставляет читаемые css/js.
+`build.py` идемпотентен, но минификацию делает НАД ИСХОДНИКАМИ: `python tools/build.py`
+перетирает `css/style.css` и все `js/*.js` их jsmin-версией, а заодно обновляет версию кэша
+service worker и lastmod в sitemap. Локально поэтому запускают `--no-minify` — читаемые css/js
+нужны не только для глаз: `tools/gate_bite.py` ищет правила мутаций по исходному тексту,
+и на переминифицированном дереве он падает на собственном якоре. В CI это безопасно —
+там своя копия репозитория, и боевой (минифицированный) вид CI собирает сам.
 Сгенерированные ассеты (vendor/, assets/img, шрифты, og, иконки) в git не хранятся —
-их собирает CI на каждом деплое.
+их собирает CI на каждом деплое. Если Pexels не отдал фото, сборка падает с `PHOTO FAIL`
+и пишет плейсхолдеры только в рабочую копию: красная сборка перезапускается, а витрина
+с градиентными плитками вместо фруктов висела бы до первого взгляда.
 
 ## Деплой
 
@@ -105,4 +112,5 @@ Vanilla HTML/CSS/JS, all assets self-hosted, zero trackers. CI (`quality` job) r
 secret scan, builds assets (Pexels photos, OFL fonts, MIT vendors), executes cart unit
 tests in a real JS engine and a quality gate, then deploys to GitHub Pages.
 Run locally: `pip install pillow rcssmin rjsmin esprima quickjs qrcode`, then
-`python tools/build.py && python tools/test_cart.py && python tools/check.py`.
+`python tools/build.py --no-minify && python tools/test_cart.py && python tools/check.py`
+(the plain build minifies the tracked css/js in place — that step belongs to CI, see «Локальный запуск»).

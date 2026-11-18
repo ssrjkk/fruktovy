@@ -447,6 +447,12 @@ try:
         restore(state)
 finally:
     restore(state)
+    # Снимок живёт только пока идёт прогон. Если оставить его после падежной смерти
+    # (анкор мутации не нашёлся — SystemExit мимо хвоста файла), следующий запуск
+    # своим recover() вернёт на дерево байты прошлого прогона и перепишет всё, что
+    # между прогонами было починено. Один раз так подменили jsmin-версию main.js,
+    # и гейт упал уже на собственном осколке.
+    shutil.rmtree(JDIR, ignore_errors=True)
 
 rc, out = run_gate()
 print("restored tree gate rc=%d %s" % (rc, out.strip().splitlines()[-1:]))
@@ -454,5 +460,4 @@ for name, det in fails:
     print("---- " + name)
     for line in det:
         print("   " + line)
-shutil.rmtree(JDIR, ignore_errors=True)
 sys.exit(1 if fails or rc != 0 else 0)

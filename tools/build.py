@@ -125,6 +125,11 @@ def build_photos(data):
     with ThreadPoolExecutor(max_workers=8) as ex:
         fails = [r for r in ex.map(photo_job, sorted(jobs)) if r]
     print(f"photos: {len(jobs) - len(fails)}/{len(jobs)} ok" + (f" PLACEHOLDERS: {fails}" if fails else ""))
+    # Плейсхолдер — это не «почти фото», а другой продукт: градиент с номером Pexels вместо
+    # снимка. Молча залить его в прод опаснее, чем покраснить CI: красная сборка перезапускается,
+    # а витрина с фейковыми плитками висит, пока кто-то заметит.
+    if fails:
+        raise SystemExit(f"PHOTO FAIL: {len(fails)}/{len(jobs)} not downloaded")
 
 
 def dl_job(item):
