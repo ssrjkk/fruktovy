@@ -1,10 +1,8 @@
-/* Офлайн-кэш. Версию проставляет сборка на каждом деплое — вручную менять не нужно. */
-var VERSION = "fd-20261117-203519";
-var CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./css/themes.css", "./assets/fonts.css",
-  "./js/data.js", "./js/main.js", "./js/theme.js", "./assets/logo.svg", "./manifest.webmanifest",
-  "./assets/icon-192.png", "./assets/icon-512.png",
-  "./vendor/swiper-bundle.min.css", "./vendor/swiper-bundle.min.js",
-  "./vendor/lenis.min.js", "./vendor/gsap.min.js", "./vendor/ScrollTrigger.min.js"];
+/* Офлайн-кэш оболочки витрины. Список CORE и версию проставляет tools/build.py —
+   руками их не менять: иначе кэш разойдётся с реальным набором файлов.
+   Стратегия: cache-first для оболочки, сеть для свежего, фото добираются по ходу. */
+var VERSION = "fd-20261121-005025";
+var CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./assets/fonts.css", "./js/app-head.js", "./js/data.js", "./js/app.js", "./assets/logo.svg", "./manifest.webmanifest", "./assets/icon-192.png", "./assets/icon-512.png"];
 self.addEventListener("install", function (e) {
   e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(CORE); }).then(function () { return self.skipWaiting(); }));
 });

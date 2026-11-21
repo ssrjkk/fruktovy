@@ -34,11 +34,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install pillow rcssmin rjsmin esprima quickjs qrcode
-      - name: Build (photos, fonts, vendors, SEO, minify)
+        run: pip install pillow rcssmin rjsmin quickjs
+      - name: Build assets (photos, fonts, og, icons, JSON-LD, precache)
         run: python tools/build.py
       - name: Cart unit tests (real JS engine)
         run: python tools/test_cart.py
+      - name: Gates must bite (mutation self-test)
+        run: python tools/gate_bite.py
+      - name: Minify css/js into the artifact
+        run: python tools/build.py --minify-only
       - name: Quality gate
         run: python tools/check.py
       - uses: actions/configure-pages@v6

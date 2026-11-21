@@ -1,953 +1,1006 @@
 #!/usr/bin/env python3
-"""Гейт качества перед деплоем. python tools/check.py [--skip-assets]"""
-import json, re, sys
+"""Гейт качества витрины «Фруктовый дворец» перед деплоем.
+
+Проверяет то, что браузер промолчит: разъехавшийся контракт JS ↔ DOM, отсутствующий
+файл сборки, палитру без токена, безымянную кнопку, выдуманную оплату в тексте.
+Пиксели (контраст, тап-цели, фокус) меряются прогоном в headless Chrome; здесь —
+статическая часть контракта. Работает и по читаемым исходникам, и по минифицированным
+после tools/build.py, поэтому порядок в CI «сборка → тесты → гейт» не слепнет.
+
+Запуск: python tools/check.py [--skip-assets]
+"""
+import json
+import re
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
+
+import quickjs
+
 ROOT = Path(__file__).resolve().parent.parent
 SKIP = "--skip-assets" in sys.argv
 ERR, NOTES = [], []
-VOID = {"meta", "link", "img", "br", "hr", "input", "source", "path", "circle", "rect", "ellipse", "line", "stop", "use", "polyline", "polygon"}
+SITE_URL = "https://ssrjkk.github.io/fruktovy/"
+BRAND = "Фруктовый дворец"
+
+VOID = {"meta", "link", "img", "br", "hr", "input", "source", "path", "circle", "rect", "ellipse",
+        "line", "stop", "use", "polyline", "polygon", "area", "base", "col", "embed", "track", "wbr"}
+GENERIC_FONTS = {"Georgia", "Times New Roman", "-apple-system", "BlinkMacSystemFont", "Segoe UI",
+                 "Roboto", "sans-serif", "serif", "monospace", "system-ui", "Apple Color Emoji"}
+# Хосты, которым разрешено торчать в исходниках. schema.org и w3.org — пространства имён
+# (JSON-LD и SVG), а не запросы наружу; wa.me и tel: — каналы связи магазина;
+# yandex.ru — единственный iframe: виджет рейтинга, он же единственный источник отзывов.
+ALLOWED_HOSTS = {"ssrjkk.github.io", "wa.me", "yandex.ru", "yandex.com", "schema.org", "www.w3.org"}
 
 
-class C(HTMLParser):
+class Doc(HTMLParser):
+    """Собирает из разметки всё, с чем сверяются гейты: теги, id, имена контролов."""
+
     def __init__(self):
-        super().__init__(convert_charrefs=True); self.stack = []; self.imgs = []; self.err = []
-    def handle_starttag(self, t, a):
-        d = dict(a)
-        if t == "img": self.imgs.append(d)
-        if t not in VOID: self.stack.append(t)
-    def handle_endtag(self, t):
-        if t in VOID: return
-        if self.stack and self.stack[-1] == t: self.stack.pop()
-        elif t in self.stack:
-            while self.stack and self.stack[-1] != t: self.err.append("unclosed " + self.stack.pop())
+        super().__init__(convert_charrefs=True)
+        self.stack, self.err, self.tags = [], [], []
+        self.ids, self.classes, self.symbols, self.uses = [], set(), set(), set()
+        self.text_bits = []
+        self.controls = []          # [{tag, attrs, text, line, label_of}]
+        self._raw = 0               # глубина <script>/<style>: их текст посетитель не читает
+        self._open = []             # стеки открытых контролов для сбора их текста
+
+    def handle_starttag(self, tag, attrs):
+        d = {k: ("" if v is None else v) for k, v in attrs}
+        self.tags.append((tag, d, self.getpos()[0]))
+        if "id" in d:
+            self.ids.append(d["id"])
+        for c in d.get("class", "").split():
+            self.classes.add(c)
+        if tag == "symbol" and "id" in d:
+            self.symbols.add(d["id"])
+        if tag == "use" and d.get("href", "").startswith("#"):
+            self.uses.add(d["href"][1:])
+        if tag in ("button", "a", "label", "summary") and tag not in VOID:
+            self._open.append({"tag": tag, "attrs": d, "line": self.getpos()[0], "text": []})
+        if tag in ("script", "style"):
+            self._raw += 1
+        if tag not in VOID:
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in VOID:
             self.stack.pop()
-        else: self.err.append("stray /" + t)
+        if self._open and self._open[-1]["tag"] == tag:
+            self._flush()
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._raw = max(0, self._raw - 1)
+        if tag in VOID:
+            return
+        if self._open and self._open[-1]["tag"] == tag:
+            self._flush()
+        elif self._open and any(o["tag"] == tag for o in self._open):
+            while self._open and self._open[-1]["tag"] != tag:
+                self._flush()
+            self._flush()
+        if self.stack and self.stack[-1] == tag:
+            self.stack.pop()
+        elif tag in self.stack:
+            while self.stack and self.stack[-1] != tag:
+                self.err.append("не закрыт <%s>" % self.stack.pop())
+            self.stack.pop()
+        else:
+            self.err.append("лишний </%s>" % tag)
+
+    def _flush(self):
+        if self._open:
+            o = self._open.pop()
+            txt = re.sub(r"\s+", " ", " ".join(o["text"])).strip()
+            self.controls.append({"tag": o["tag"], "attrs": o["attrs"], "line": o["line"], "text": txt})
+
+    def handle_data(self, data):
+        if self._raw:
+            return
+        t = data.strip()
+        if t:
+            self.text_bits.append(t)
+            for o in self._open:
+                o["text"].append(t)
+
+    def feed_file(self, path):
+        self.feed(path.read_text(encoding="utf-8"))
+        while self._open:
+            self._flush()
+        if self.stack:
+            self.err.append("висящие теги: " + ", ".join(self.stack))
+        return self
 
 
-for name in ("index.html", "404.html"):
-    c = C(); c.feed((ROOT / name).read_text(encoding="utf-8"))
-    if c.err or c.stack: ERR.append(f"{name}: {c.err} {c.stack}")
-    if not c.imgs and name == "index.html": ERR.append("index.html: no imgs scanned (blind)")
-    for i, a in enumerate(c.imgs):
-        for r in ("alt", "width", "height"):
-            if r not in a: ERR.append(f"{name} img#{i} no {r}")
+def attr_of(doc, tag, name):
+    return [d[name] for t, d, _ in doc.tags if t == tag and name in d]
 
-html = (ROOT / "index.html").read_text(encoding="utf-8")
-blocks = re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S)
-if len(blocks) < 2: ERR.append("expected main JSON-LD + ld-catalog")
-for b in blocks:
-    try: json.loads(b)
-    except Exception as e: ERR.append(f"JSON-LD: {e}")
-main = json.loads(blocks[0])
-faq = [x for x in main["@graph"] if x["@type"] == "FAQPage"][0]["mainEntity"]
-if not faq: ERR.append("FAQ empty (blind)")
 
-import quickjs
+def metas(doc, key):
+    return [d["content"] for t, d, _ in doc.tags if t == "meta" and (d.get("name") or d.get("property")) == key]
+
+
+def media_block(text, cond):
+    """Тело @media <cond> { … } через счётчик скобок: минификатор снимает пробелы после @media и вокруг «:», поэтому условие собирается в шаблон токен за токеном."""
+    tokens = re.findall(r"\(|\)|[A-Za-z-]+:|[A-Za-z0-9.-]+", cond)
+    pat = r"@media\s*" + r"\s*".join(re.escape(t) for t in tokens)
+    for m in re.finditer(pat + r"\s*\{", text):
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+            i += 1
+        return text[m.end():i - 1]
+    return None
+
+
+def squash(text):
+    """CSS без пробелов вокруг : ; { } , — чтобы сверять префиксы в любом виде."""
+    return re.sub(r"\s*([:;,{}])\s*", r"\1", text)
+
+
+# ---------------------------------------------------------------- sources ----
+index_path = ROOT / "index.html"
+doc = Doc().feed_file(index_path)
+html = index_path.read_text(encoding="utf-8")
+plain = re.sub(r"\s+", " ", " ".join(doc.text_bits))
+css_path = ROOT / "css" / "style.css"
+css = css_path.read_text(encoding="utf-8") if css_path.exists() else ""
+JS_FILES = ["js/app-head.js", "js/data.js", "js/app.js"]
+js = "\n".join((ROOT / f).read_text(encoding="utf-8") for f in JS_FILES if (ROOT / f).exists())
+app_js = (ROOT / "js" / "app.js").read_text(encoding="utf-8")
+head_js = (ROOT / "js" / "app-head.js").read_text(encoding="utf-8")
+data_js = (ROOT / "js" / "data.js").read_text(encoding="utf-8")
+DEFAULT_THEME = (re.search(r'<html lang="([a-z]+)"[^>]*data-theme="([a-z]+)"', html) or [None, None, "market"])[2]
+
+for p in (index_path, css_path) + tuple(ROOT / f for f in JS_FILES):
+    if not p.exists():
+        ERR.append(f"нет исходника {p.relative_to(ROOT).as_posix()}")
+    elif not p.read_text(encoding="utf-8").strip():
+        ERR.append(f"пустой исходник {p.relative_to(ROOT).as_posix()}")
+if not js or not css:
+    print("FAIL:")
+    for e in ERR:
+        print(" -", e)
+    sys.exit(1)
+
+# ============================================================ 1. РАЗМЕТКА ====
+if doc.err:
+    ERR.append("index.html: " + "; ".join(doc.err[:6]))
+dupes = sorted({i for i in doc.ids if doc.ids.count(i) > 1})
+if dupes:
+    ERR.append("дубли id в index.html: " + ", ".join(dupes[:8]))
+d404 = Doc().feed_file(ROOT / "404.html")
+if d404.err:
+    ERR.append("404.html: " + "; ".join(d404.err[:6]))
+for t, dd, line in d404.tags:
+    if t in ("link", "script"):
+        target = dd.get("href") or dd.get("src") or ""
+        if target.startswith(("css/", "js/", "assets/", "manifest")) and not (ROOT / target).exists() and not SKIP:
+            ERR.append(f"404.html: нет файла {target}")
+    if t == "use":
+        ERR.append("404.html: <use> на спрайт из index.html — в другом документе он пустой")
+
+img_tags = [(d, line) for t, d, line in doc.tags if t == "img"]
+imgs = [d for d, _ in img_tags]
+# «ниже каталога» считаем по строке разметки: поиск подстроки в html нашёл бы first-вхождение,
+# а оно всегда живёт в <head> (preload) или в hero.
+cat_line = next((line for t, d, line in doc.tags if d.get("id") == "catalog"), 10 ** 9)
+if not imgs:
+    ERR.append("index.html: ни одной картинки — гейт слепой")
+# src у картинок модалки и лайтбокса подставляет JS по открытию: в разметке его нет по замыслу
+js_managed_src = set()
+for m in re.finditer(r"""(?:getElementById\(\s*['"]|querySelector\(\s*['"]#|\$\(\s*['"]#)([\w-]+)['"]""", js):
+    if re.search(r"\.src\s*=", js[m.end():m.end() + 300]):
+        js_managed_src.add(m.group(1))
+for i, a in enumerate(imgs):
+    for r in ("alt", "width", "height", "src"):
+        if r not in a and not (r == "src" and a.get("id") in js_managed_src):
+            ERR.append(f"img#{i} ({a.get('src', '?')[:44]}) без {r}")
+    if a.get("loading") not in (None, "lazy", "eager"):
+        ERR.append(f"img#{i}: loading={a['loading']}")
+    src = a.get("src", "")
+    if src.startswith(("http://", "//")):
+        ERR.append(f"img#{i}: картинка грузится не с нашего домена ({src[:50]})")
+    elif src.startswith("./assets/img/") and not (ROOT / src.lstrip("./")).exists() and not SKIP:
+        ERR.append(f"img#{i}: нет файла {src}")
+# жадная загрузка только до каталога: всё, что ниже, обязано быть ленивым
+for i, (a, line) in enumerate(img_tags):
+    if line > cat_line and a.get("loading") != "lazy":
+        ERR.append(f"img#{i} ниже каталога без loading=lazy — телефон тянет весь прилавок")
+
+# доступные имена контролов
+for c in doc.controls:
+    d, line = c["attrs"], c["line"]
+    if c["tag"] == "button":
+        named = d.get("aria-label") or d.get("aria-labelledby") or c["text"]
+        if not named:
+            ERR.append(f"кнопка@{line} без текста и без aria-label: class=\"{d.get('class', '')}\"")
+
+for t, dd, line in doc.tags:
+    if t in ("input", "select", "textarea") and dd.get("type") not in ("hidden", "submit", "button", "reset"):
+        pid = dd.get("id", "")
+        wrapped = pid and re.search(r"<label[^>]*>(?:(?!</label>)[\s\S])*?<" + t + r"\b[^>]*id=\"" + re.escape(pid), html)
+        labelled = bool(dd.get("aria-label") or dd.get("aria-labelledby") or (pid and f'for="{pid}"' in html) or wrapped)
+        if not labelled:
+            ERR.append(f"<{t} id=\"{pid or '?'}\">@{line}: у поля нет доступного имени "
+                       "(aria-label, aria-labelledby, <label for> или обёртка <label>)")
+
+for t, dd, line in doc.tags:
+    if t == "iframe":
+        if not dd.get("title"):
+            ERR.append(f"iframe@{line} без title — скринридер читает пустоту")
+        if not dd.get("src", "").startswith("https://yandex.ru/"):
+            ERR.append(f"iframe@{line}: источник вне белого списка: {dd.get('src', '')[:60]}")
+    if dd.get("href", "").startswith("javascript:"):
+        ERR.append(f"<{t}>@{line}: javascript:-ссылка")
+    if t == "a" and dd.get("target", "_self") == "_blank" and "noopener" not in (dd.get("rel") or ""):
+        ERR.append(f"<a href=\"{dd.get('href', '')[:40]}\">@{line}: target=_blank без rel\"noopener\"")
+
+known_ids = set(doc.ids)
+for t, dd, line in doc.tags:
+    v = dd.get("href", "")
+    if v.startswith("#") and len(v) > 1 and v[1:] not in known_ids:
+        ERR.append(f"<{t} href=\"{v}\">@{line}: якоря нет в разметке")
+    for key in ("aria-labelledby", "aria-describedby", "aria-controls", "for"):
+        for ref in (dd.get(key) or "").split():
+            if ref not in known_ids:
+                ERR.append(f"<{t} {key}=\"{ref}\">@{line}: несуществующий id")
+
+# часть иконок рисуют шаблоны из app.js (избранное, стрелки) — в разметке их нет
+js_uses = set(re.findall(r'<use\s+href="#([\w-]+)"', app_js))
+missing_syms = sorted((doc.uses | js_uses) - doc.symbols)
+unused_syms = sorted(doc.symbols - (doc.uses | js_uses))
+if missing_syms:
+    ERR.append("спрайт: <use> ссылается на несуществующий символ: " + ", ".join(missing_syms))
+if unused_syms:
+    ERR.append("спрайт: символы не используются (мёртвый вес): " + ", ".join(unused_syms))
+if len(doc.symbols) < 4:
+    ERR.append("спрайт пуст — иконки рисуем не чем")
+if not any('aria-live' in str(d) for t, d, _ in doc.tags):
+    ERR.append("нет ни одной aria-live-зоны: тосты и счётчик пакета неозвучимы")
+
+h1 = [t for t, d, _ in doc.tags if t == "h1"]
+if len(h1) != 1:
+    ERR.append(f"на странице {len(h1)} заголовков h1 (нужен ровно один)")
+
+# ============================================================== 2. HEAD =====
+def need(pattern, what):
+    if not re.search(pattern, html):
+        ERR.append("head: нет " + what)
+
+
+need(r'<meta charset="UTF-8"', "charset")
+need(r'name="viewport" content="width=device-width', "viewport")
+need(r'name="description" content="[^"]{60,400}"', "description (60–400 знаков)")
+need(r'name="robots" content="index, follow"', "robots")
+need(r'rel="canonical" href="' + re.escape(SITE_URL) + '"', "canonical на " + SITE_URL)
+need(r'property="og:image" content="' + re.escape(SITE_URL) + r'assets/og\.png"', "абсолютный og:image")
+need(r'name="twitter:card" content="summary_large_image"', "twitter:card")
+need(r'rel="manifest" href="manifest\.webmanifest"', "ссылка на манифест")
+need(r'rel="apple-touch-icon" href="assets/icon-192\.png"', "apple-touch-icon")
+need(r'rel="preload" as="image" href="\./assets/img/[^"]+" fetchpriority="high"', "preload LCP-картинки")
+need(r'rel="stylesheet" href="assets/fonts\.css"', "assets/fonts.css")
+need(r'rel="stylesheet" href="css/style\.css"', "css/style.css")
+title = re.search(r"<title>(.*?)</title>", html)
+if not title or BRAND not in title.group(1):
+    ERR.append("head: в <title> нет названия магазина")
+elif len(title.group(1)) > 78:
+    NOTES.append(f"head: <title> {len(title.group(1))} знаков — в выдаче обрежут")
+for prop in ("og:type", "og:locale", "og:site_name", "og:title", "og:description", "og:url"):
+    if prop not in html:
+        ERR.append(f"head: нет {prop}")
+if BRAND not in " ".join(metas(doc, "og:site_name")):
+    ERR.append("og:site_name не совпадает с названием магазина")
+for v in metas(doc, "og:url") + metas(doc, "og:image"):
+    if not v.startswith(SITE_URL):
+        ERR.append(f"og-ссылка не абсолютная на {SITE_URL}: {v}")
+preload = re.search(r'rel="preload" as="image" href="([^"]+)"', html)
+hot = [(a, line) for a, line in img_tags if a.get("fetchpriority") == "high"]
+if preload:
+    if len(hot) != 1:
+        ERR.append(f"прелоад LCP: картинок с fetchpriority=\"high\" — {len(hot)}, а должна быть одна")
+    elif not hot[0][0].get("src", "").endswith(preload.group(1).split("/")[-1]):
+        ERR.append(f"прелоад {preload.group(1)} ≠ картинка с fetchpriority=high ({hot[0][0].get('src', '')})")
+    elif hot[0][1] > cat_line:
+        ERR.append("прелоад тащит картинку ниже каталога — это не LCP, а трафик впустую")
+
+# ============================================================== 3. CSP ======
+csp_tag = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)"', html)
+if not csp_tag:
+    ERR.append("CSP: нет meta-политики")
+else:
+    directives = {}
+    for chunk in csp_tag.group(1).split(";"):
+        bits = chunk.strip().split()
+        if bits:
+            directives[bits[0]] = bits[1:]
+    for d_name in ("default-src", "script-src", "style-src", "img-src", "font-src", "connect-src",
+                   "object-src", "base-uri", "form-action"):
+        if d_name not in directives:
+            ERR.append(f"CSP: нет директивы {d_name}")
+    if directives.get("script-src") != ["'self'"]:
+        ERR.append("CSP: script-src должен быть ровно 'self' — скрипты обязаны лежать у нас")
+    if directives.get("object-src") != ["'none'"]:
+        ERR.append("CSP: object-src должен быть 'none'")
+    if directives.get("base-uri") != ["'self'"]:
+        ERR.append("CSP: base-uri должен быть 'self'")
+    if directives.get("form-action") != ["'self'"]:
+        ERR.append("CSP: form-action должен быть 'self' — формы у нас никуда не отправляются")
+    if "'unsafe-eval'" in directives.get("script-src", []) or "'unsafe-inline'" in directives.get("script-src", []):
+        ERR.append("CSP: script-src разрешает лишнее")
+    for bad in ("img-src", "font-src", "connect-src"):
+        if any(v.startswith("http") for v in directives.get(bad, [])):
+            ERR.append(f"CSP: {bad} отворён наружу")
+    if any(not v.startswith("https://yandex.ru") for v in directives.get("frame-src", [])):
+        ERR.append("CSP: frame-src пущен не только в yandex.ru")
+
+for tag_open, body in re.findall(r"(<script[^>]*>)(.*?)</script>", html, re.S):
+    if "src=" in tag_open or "application/ld+json" in tag_open:
+        continue
+    if body.strip():
+        ERR.append("CSP: inline-скрипт с кодом в разметке — политика его заблокирует")
+if len(re.findall(r'<script src="js/', html)) != 3:
+    ERR.append("ожидались три <script src=js/…>: app-head, data, app")
+if not re.search(r'<script src="js/app-head\.js"></script>', html):
+    ERR.append("js/app-head.js должен грузиться синхронно и без defer — иначе видна вспышка базовой темы")
+if re.search(r'<script[^>]*src="js/(data|app)\.js"[^>]*>', html):
+    for tag in re.findall(r'<script[^>]*src="js/(?:data|app)\.js"[^>]*>', html):
+        if "defer" not in tag:
+            ERR.append(f"{tag}: каталог и логика обязаны идти с defer — они читают DOM")
+if re.search(r"\son[a-z]+\s*=", html):
+    ERR.append("inline-обработчик on*= в разметке (CSP его режет, а браузер молчит)")
+if re.search(r"""["']on(?:click|error|load|input|change|submit)["']\s*:""", app_js):
+    ERR.append("inline-обработчик on*= генерируется из JS")
+if re.search(r"""\son(?:click|error|load|input|change|submit)\s*=\s*["']""", app_js):
+    ERR.append("JS подвешает on*-атрибут строкой: под жёсткой CSP он мёртвый код, обработчик вешают "
+               "через addEventListener, а цвет фолбэка — из data-fb-*")
+for pat, why in ((r"\beval\s*\(", "eval"), (r"new\s+Function\s*\(", "new Function"),
+                 (r"document\.write\s*\(", "document.write")):
+    if re.search(pat, js):
+        ERR.append(f"JS: {why} — под жёсткой CSP это либо смерть, либо дыра")
+for m in re.finditer(r"innerHTML\s*=\s*([^;]{0,220})", js):
+    if re.search(r"location\.|URLSearchParams|decodeURIComponent|\.hash\b|\.search\b", m.group(1)):
+        ERR.append("JS подставляет в innerHTML данные из адреса страницы: чужая ссылка подшьёт разметку")
+
+# ======================================================= 4. ХОСТЫ И ССЫЛКИ ====
+for src_name, text in (("index.html", html), ("css/style.css", css), ("js", js)):
+    for host in sorted(set(re.findall(r"https?://([A-Za-z0-9.-]+)", text)) - ALLOWED_HOSTS):
+        ERR.append(f"{src_name}: хост не в белом списке: {host}")
+for u in re.findall(r"""["']((?:https?:)?//[^"']+|/[^"'\s]*\.(?:js|css|png|jpe?g|svg|webp|woff2))["']""", js):
+    host = re.sub(r"^https?:", "", u).lstrip("/").split("/")[0]
+    if u.startswith(("http://", "//")) and host not in ALLOWED_HOSTS:
+        ERR.append(f"js: ссылка не на https по нашему пути: {u[:60]}")
+
+# ============================================ 5. КОНТРАКТ JS ↔ DOM ↔ ДАННЫЕ ====
+js_ids = set(re.findall(r"""getElementById\(\s*['"]([\w-]+)""", js))
+js_ids |= set(re.findall(r"""\$\(\s*['"]#([\w-]+)""", js))
+js_ids |= set(re.findall(r"""querySelector(?:All)?\(\s*['"]#([\w-]+)""", js))
+dead_ids = sorted(i for i in js_ids if i not in known_ids)
+if dead_ids:
+    ERR.append("JS обращается к id, которых нет в разметке: " + ", ".join(dead_ids[:8]))
+if len(js_ids) < 15:
+    ERR.append(f"JS трогает лишь {len(js_ids)} id — разбор кода слепой, гейт ничего не проверяет")
+# динамические in-page ссылки из JS (хэш пакета, якоря каталога)
+dyn_ids = set(re.findall(r'id="([\w-]+)"', app_js)) | set(re.findall(r"""id='([\w-]+)'""", app_js))
+for h in set(re.findall(r"""["']#([\w-]+)["']""", app_js)):
+    if h not in known_ids and h not in dyn_ids and h not in {"cart"} and len(h) > 2 and not h.startswith("i-"):
+        NOTES.append(f"js ссылается на #{h}, такого id нет ни в разметке, ни в его шаблонах")
+# Атрибуты, которые JS вычитывает из DOM: они обязаны существовать — либо в разметке,
+# либо в шаблонах, которые сам JS и печатает. Селекторы вида [data-x] выкидываем, иначе
+# запрос сам себе доказывал бы, что атрибут есть.
+tpl_text = re.sub(r"\[[^\]]*?\bdata-[a-z-]+[^\]]*?\]", " ", js)
+declared_attrs = set(re.findall(r"\b(data-[a-z-]+)", html)) | set(re.findall(r"\b(data-[a-z-]+)", tpl_text))
+for camel in set(re.findall(r"dataset\.([A-Za-z][A-Za-z0-9]*)\s*=(?!=)", js)):
+    declared_attrs.add("data-" + re.sub(r"([A-Z])", lambda m: "-" + m.group(1).lower(), camel))
+queried = set(re.findall(r"""(?:querySelector(?:All)?|closest)\(\s*['"][^'"]*?\[(data-[a-z-]+)""", app_js))
+queried |= {"data-" + re.sub(r"([A-Z])", lambda m: "-" + m.group(1).lower(), c)
+            for c in set(re.findall(r"\.dataset\.([A-Za-z][A-Za-z0-9]*)", app_js))}
+for a in sorted(queried - declared_attrs):
+    ERR.append(f"JS читает [{a}], которого нет ни в разметке, ни в его шаблонах")
+
+keys_block = re.search(r"const KEYS\s*=\s*\{([^}]*)\}", data_js)
+if not keys_block:
+    ERR.append("data.js: нет таблицы KEYS")
+else:
+    declared = dict(re.findall(r"(\w+):\s*['\"]([^'\"]+)['\"]", keys_block.group(1)))
+    used_props = set(re.findall(r"KEYS\.(\w+)", js))
+    if not used_props <= set(declared):
+        ERR.append("JS читает KEYS, которых нет в таблице: " + ", ".join(sorted(used_props - set(declared))))
+    if not {"cart", "orders", "favs"} <= set(declared) or not {"cart", "orders", "favs"} <= used_props:
+        ERR.append("KEYS: пакет/заявки/избранное не сохранятся — всё живёт до перезагрузки")
+    for key in declared.values():
+        if not re.fullmatch(r"fd\.[a-zA-Z]+(\.v\d+)?", key):
+            ERR.append(f"ключ localStorage {key!r} вне неймспейса fd.* — можно столкнуться с другим сайтом")
+    if re.search(r"localStorage\.(get|set|remove)Item\(\s*['\"](?!fd\.)", js):
+        ERR.append("localStorage трогается мимо KEYS")
+
+# ============================================================== 6. ДАННЫЕ ====
 ctx = quickjs.Context()
-ctx.eval((ROOT / "js" / "data.js").read_text(encoding="utf-8"))
-data = json.loads(ctx.eval("JSON.stringify({PRODUCTS: PRODUCTS, GALLERY: GALLERY, GUIDE: GUIDE, CATS: CATS})"))
-if len(data["PRODUCTS"]) < 20: ERR.append("products scan blind")
-cat = json.loads(re.search(r'id="ld-catalog">(.*?)</script>', html, re.S).group(1))
-if not SKIP and len(cat.get("itemListElement", [])) != len(data["PRODUCTS"]): ERR.append("ld-catalog not injected")
+data = json.loads(ctx.eval(data_js + "\n;JSON.stringify({P: PRODUCTS, G: GALLERY_ITEMS, D: DAILY_HITS,"
+                                 " A: AISLES, PR: PROMOS, T: THEME_LABELS, M: MONTHS, CM: CURRENT_MONTH})"))
+PRODUCTS, GALLERY = data["P"], data["G"]
+if len(PRODUCTS) < 20:
+    ERR.append(f"каталог усох до {len(PRODUCTS)} позиций — гейт слепой")
+ids = [p["id"] for p in PRODUCTS]
+if len(ids) != len(set(ids)):
+    ERR.append("в каталоге повторяющиеся id")
+aisle_ids = {a["id"] for a in data["A"]}
+for p in PRODUCTS:
+    miss = [k for k in ("id", "name", "cat", "unit", "weightKg", "photo", "color", "season", "note")
+            if p.get(k) in (None, "", [])]
+    if "price" not in p or "oldPrice" not in p:
+        miss.append("price/oldPrice (должны быть null)")
+    if p.get("price") is not None or p.get("oldPrice") is not None:
+        ERR.append(f"{p['id']}: в данных появилась цена — на витрине их нет намеренно")
+    if p.get("photo") and not re.fullmatch(r"\d+", str(p["photo"])):
+        ERR.append(f"{p['id']}: photo должен быть числовым id Pexels")
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", str(p.get("color", ""))):
+        ERR.append(f"{p['id']}: color вне формата #RRGGBB — плейсхолдер не отрисуется")
+    if p.get("cat") and p["cat"] not in aisle_ids:
+        ERR.append(f"{p['id']:12} лежит в ряду {p['cat']}, которого нет в AISLES")
+    if miss:
+        ERR.append(f"{p['id']}: пустые поля {miss}")
+for p in PRODUCTS:
+    for t in p.get("together", []):
+        if t not in ids:
+            ERR.append(f"«часто берут вместе» у {p['id']} ссылается на снятую позицию {t}")
+for h in data["D"]:
+    if h not in ids:
+        ERR.append(f"хит дня {h} отсутствует в каталоге")
+if len(data["D"]) < 3:
+    ERR.append("хитов дня меньше трёх — доска «утренний завоз» пустая")
+if not (1 <= int(data["CM"]) <= 12):
+    ERR.append("CURRENT_MONTH вне 1..12")
+if len(data["M"]) != 12:
+    ERR.append("MONTHS должен содержать 12 месяцев — сезонная шкала иначе врёт")
+for g in GALLERY:
+    if not g.get("photo") or not g.get("caption"):
+        ERR.append("галерея: кадр без фото или подписи")
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", str(g.get("color", ""))):
+        ERR.append("галерея: color вне формата #RRGGBB")
+if not GALLERY:
+    ERR.append("галерея пуста")
+for code, promo in data["PR"].items():
+    if not re.fullmatch(r"[А-ЯЁA-Z0-9]+", code):
+        ERR.append(f"промокод {code!r} не в верхнем регистре — поле его не распознает")
+    if not promo.get("label"):
+        ERR.append(f"промокод {code}: нет человеческой расшифровки")
+    if re.search(r"примен|итог|сумм", promo.get("label", ""), re.I):
+        ERR.append(f"промокод {code}: обещает пересчёт суммы, которого на витрине нет")
 
-json.loads((ROOT / "manifest.webmanifest").read_text(encoding="utf-8"))
-for cssp in sorted((ROOT / "css").glob("*.css")) + [ROOT / "assets" / "fonts.css"]:
-    if not cssp.exists():
-        if not SKIP: ERR.append("missing " + str(cssp))
-        continue
-    css = cssp.read_text(encoding="utf-8")
-    if css.count("{") != css.count("}"): ERR.append(f"CSS braces {cssp.name}")
-    for u in re.findall(r'url\("([^"]+)"\)', css):
-        if u.startswith("data:"): continue
-        if not (cssp.parent / u).resolve().exists() and not SKIP: ERR.append("css url " + u)
+# ==================================================== 7. ЧЕСТНОСТЬ ТЕКСТА ====
+FORBIDDEN = [
+    (r"\bСБП\b", "упоминание СБП — онлайн-оплаты у магазина нет"),
+    (r"\bCVC\b|\bCVV\b", "поля платёжной карты"),
+    (r"[Оо]плачен[оае]", "текст про оплату"),
+    (r"[Ээ]квайринг", "эквайринг"),
+    (r"[Кк]арта онлайн|оплатить картой", "приём карт онлайн"),
+    (r"priceRange", "priceRange в разметке — цен нет"),
+    (r"Мадина|Madina", "выдуманное лицо продавца"),
+    (r"100 ?% гаранти|гарантируем качество", "гарантийное обещание"),
+    (r"самые низкие цены|лучшие цены в|дешевле всех", "ценовое обещание"),
+    (r"более \d+ (?:клиентов|покупателей|отзывов)", "выдуманная аудитория"),
+    (r"\d+ (?:лет|года) на рынке", "выдуманный стаж"),
+    (r"(?:5\.0|4\.9|5 зв)", "рейтинг, которого нет на Яндекс Картах"),
+]
+for pat, why in FORBIDDEN:
+    for src_name, text in (("index.html", html), ("css/style.css", css), ("js", js)):
+        if re.search(pat, text):
+            ERR.append(f"{src_name}: {why}")
+if re.search(r"price:\s*[0-9]", data_js):
+    ERR.append("data.js: числовая цена в каталоге")
+if "по запросу" not in app_js:
+    ERR.append("в карточках нет заглушки «по запросу» — посетитель увидит пустоту вместо цены")
+# обещания про цены и наличие: если и звучат, то только как «уточнит продавец»
+for claim in ("доставка за 30", "доставим за 30", "круглосуточн"):
+    if claim in plain.lower():
+        NOTES.append(f"в тексте встретилось «{claim}» — сверить, что это правда")
 
-# Кавычка в стеке шрифтов, которой нет в assets/fonts.css, в проде молча
-# подменяется системной гарнитурой: метрики плывут, а в браузере всё «нормально».
-SYS_FACES = {"Arial Narrow", "Roboto Condensed", "Liberation Sans Narrow",
-             "Franklin Gothic Medium", "Segoe UI", "Times New Roman", "Noto Sans"}
-_fonts = ROOT / "assets" / "fonts.css"
-if _fonts.exists():
-    hosted = set(re.findall(r'font-family:"([^"]+)"', _fonts.read_text(encoding="utf-8")))
-    used = set()
-    decl = re.compile(r'(?:font-family|--[\w-]*(?:font|display|body|heading)[\w-]*)\s*:\s*([^;}]+)')
-    for cssp in sorted((ROOT / "css").glob("*.css")):
-        for value in decl.findall(cssp.read_text(encoding="utf-8")):
-            used |= set(re.findall(r'"([^"]+)"', value))
-    for fam in sorted(used - SYS_FACES - hosted):
-        ERR.append(f"шрифт {fam} используется в CSS, но не самохостed в assets/fonts.css")
-
-try:
-    import esprima
-    for p in sorted((ROOT / "js").glob("*.js")) + [ROOT / "sw.js"]:
-        try: esprima.parseScript(p.read_text(encoding="utf-8"))
-        except Exception as e: ERR.append(f"JS {p.name}: {e}")
-except ImportError:
-    NOTES.append("esprima missing")
-
-refs = set(re.findall(r'(?:href|src|data-full)="([^"#]+)"', html))
-for ss in re.findall(r'(?:srcset|imagesrcset)="([^"]+)"', html):
-    refs.update(x.strip().split(" ")[0] for x in ss.split(","))
-checked = 0
-for u in refs:
-    if u.startswith(("http", "tel:", "mailto:", "data:")) or u == "./": continue
-    checked += 1
-    if not (ROOT / u).exists() and not SKIP: ERR.append("missing " + u)
-if not checked: ERR.append("no local refs scanned (blind)")
-
-symbols = set(re.findall(r'<symbol id="i-([a-z0-9-]+)"', html))
-MAINJS = (ROOT / "js" / "main.js").read_text(encoding="utf-8")
-DATAJS = (ROOT / "js" / "data.js").read_text(encoding="utf-8")
-used = set(re.findall(r'ico\(\'([a-z0-9-]+)\'\)', MAINJS))
-used.update(re.findall(r'<use href="#i-([a-z0-9-]+)"', html))
-# Глифы вызываются и из данных: HOW-шаги в main.js и подсказки GUIDE в data.js.
-# Без этого блока новый глиф, заявленный только в данных, считался бы неиспользованным.
-used.update(re.findall(r"i:\s*'([a-z0-9-]+)'", MAINJS))
-used.update(re.findall(r"i:\s*'([a-z0-9-]+)'", DATAJS))
-if len(symbols) < 20: ERR.append("sprite scan blind")
-if used - symbols: ERR.append(f"icons used but not in sprite: {sorted(used - symbols)}")
-if symbols - used: ERR.append(f"sprite icons never used: {sorted(symbols - used)}")
-
-# Подсказки по хранению: их иконки лежат в data.js, и до этого блока спрайт для них
-# не проверялся вовсе.
-gtabs = set(re.findall(r'data-tab="([^"]+)"',
-                       re.search(r'id="guideTabs".*?</div>', html, re.S).group(0)))
-cat_ids = {c["id"] for c in data["CATS"] if c["id"] not in ("all", "fav")}
-# У CATS только вывеска: поля товаров, затёсанные сюда же, читаются молча и ничего не ломают.
-cat_extra = sorted({c["id"]: sorted(set(c) - {"id", "name", "icon"}) for c in data["CATS"] if set(c) - {"id", "name", "icon"}}.items())
-if cat_extra:
-    ERR.append(f"category rows carrying product fields: {cat_extra}")
-GUIDE = data["GUIDE"]
-noguide = sorted(cat_ids - set(GUIDE))
-if noguide:
-    ERR.append(f"catalog categories without guide tips: {noguide}")
-untabbed = sorted(set(GUIDE) - gtabs)
-if untabbed:
-    ERR.append(f"guide tips without a tab: {untabbed}")
-badicons = sorted({t["i"] for tips in GUIDE.values() for t in tips} - symbols)
-if badicons:
-    ERR.append(f"guide icons missing from sprite: {badicons}")
-shorth = [f"{k}/{t['t']}" for k, tips in GUIDE.items() for t in tips if len(t.get("d", "")) < 40]
-if shorth:
-    ERR.append("guide tips shorter than 40 chars: " + repr(shorth))
-# Два совета в одной вкладке с одним глифом читаются как одна и та же мысль:
-# подпись различить их не помогает, когда список проглядывают по иконкам.
-dup = {tab: sorted({t["i"] for t in tips if [x["i"] for x in tips].count(t["i"]) > 1})
-       for tab, tips in GUIDE.items()}
-dup = {k: v for k, v in dup.items() if v}
-if dup:
-    ERR.append("guide tabs reusing one glyph for two tips: " + repr(dup))
-
-# Контракт загрузки картинок: всё до каталога грузится жадно (это первый экран),
-# всё после — лениво. Первая же обязана быть заявлена как LCP.
-real_imgs = [(m.start(), m.group(0)) for m in re.finditer(r"<img\b[^>]*>", html) if 'src="data:' not in m.group(0)]
-if len(real_imgs) < 3:
-    ERR.append("index.html has almost no imgs to police (blind)")
-cat_at = html.find('id="catalog"')
-if cat_at < 0:
-    ERR.append("no catalog anchor: cannot tell what is below the fold")
-eager = 0
-for pos, tag in real_imgs:
-    src = (re.search(r'src="([^"]+)"', tag) or [None, "?"])[1]
-    lm = re.search(r'loading="([^"]+)"', tag)
-    if not lm:
-        ERR.append(f"img without an explicit loading decision: {src}")
-        continue
-    if pos < cat_at:
-        eager += 1
-        if lm.group(1) != "eager":
-            ERR.append(f"first-screen img is lazy and will pop in: {src}")
-    elif lm.group(1) != "lazy":
-        ERR.append(f"img below the catalog is not lazy-loaded: {src}")
-if sum('fetchpriority="high"' in t for _, t in real_imgs) != 1:
-    ERR.append('exactly one img may claim fetchpriority="high" (the LCP hero art)')
-if eager > 4:
-    ERR.append(f"{eager} eager imgs above the catalog: first paint pays for every one")
-jsn = (ROOT / "js" / "main.js").read_text(encoding="utf-8")
-lazy_miss = sorted({re.search(r"<img\b[^>]*>", t).group(0)[:56] for t in re.findall(r"<img\b[^>]*>", jsn) if "loading=" not in t})
-if lazy_miss:
-    ERR.append("JS-rendered imgs without a loading decision: " + repr(lazy_miss[:4]))
-
-if not SKIP:
-    for v in ("swiper-bundle.min.js", "swiper-bundle.min.css", "lenis.min.js", "gsap.min.js", "ScrollTrigger.min.js"):
-        if not (ROOT / "vendor" / v).exists(): ERR.append("vendor " + v)
-    for f in ("og.png", "icon-192.png", "icon-512.png", "fonts.css"):
-        if not (ROOT / "assets" / f).exists(): ERR.append("assets " + f)
-    if "__BUILD_ID__" in (ROOT / "sw.js").read_text(encoding="utf-8"): ERR.append("sw not stamped")
-import xml.etree.ElementTree as ET
-ET.fromstring((ROOT / "sitemap.xml").read_text(encoding="utf-8"))
-if "Content-Security-Policy" not in html: ERR.append("no CSP")
-if 'rel="canonical"' not in html: ERR.append("no canonical")
-if "https://ssrjkk.github.io/fruktovy/sitemap.xml" not in (ROOT / "robots.txt").read_text(encoding="utf-8"):
-    ERR.append("robots sitemap drift")
-CANON = "https://ssrjkk.github.io/fruktovy/"
-
-# Наполнение каталога: у каждой позиции свой вкус и своё хранение. Раньше peek
-# брал первый совет категории, и яблокам показывалось про бананы.
-DECOR = (ROOT / "css" / "style.css").read_text(encoding="utf-8")
-PIDS = [p["id"] for p in data["PRODUCTS"]]
-if len(PIDS) < 20:
-    ERR.append("product content scan blind")
-baduse = sorted(p["id"] for p in data["PRODUCTS"] if not 45 <= len(p.get("use", "")) <= 115)
-if baduse:
-    ERR.append(f"taste text out of 45..115 chars: {baduse}")
-badstore = sorted(p["id"] for p in data["PRODUCTS"] if not 30 <= len(p.get("store", "")) <= 100)
-if badstore:
-    ERR.append(f"storage note out of 30..100 chars: {badstore}")
-for field, label in (("use", "taste"), ("store", "storage")):
-    vals = [p.get(field, "") for p in data["PRODUCTS"]]
-    dup = sorted({v for v in vals if v and vals.count(v) > 1})
-    if dup:
-        ERR.append(f"same {label} text on several products: {dup}")
-if 'id="peekDesc"' not in html:
-    ERR.append("peek dialog has no place for the product taste text")
-for frag, what in (("+esc(p.use)+", "taste text never rendered on a card"),
-                   ("$('#peekDesc').textContent=p.use", "taste text never rendered in peek"),
-                   ("p.store||", "peek still uses the category note instead of the product one")):
-    if frag not in jsn:
-        ERR.append(what)
-for sel in (".p-use", ".peek-desc"):
-    m = re.search(re.escape(sel) + r"\{([^}]*)\}", DECOR)
-    if not m:
-        ERR.append(f"no style for {sel}")
-    elif sel == ".p-use" and "line-clamp" not in m.group(1):
-        ERR.append(".p-use has no line clamp: cards of different lengths will tear the grid")
-
-# Фон витрины: мягкий цвет и бумажное зерно. Сетка-«квадраты» и ходящие лучи — ровно то,
-# из-за чего магазин выглядит сгенерированным; их убрали по прямой просьбе.
-for cls in (".bg-grid", ".bg-rays"):
-    if cls in DECOR or cls[1:] in html:
-        ERR.append(f"decorative square layer still wired: {cls}")
-if re.search(r"data:image/svg\+xml[^)]*?M0 \d+h\d+M\d+ 0v\d+", DECOR):
-    ERR.append("square-grid pattern painted as a background overlay")
-for need in ("bg-mesh", "bg-grain"):
-    if need not in html:
-        ERR.append(f"background layer missing: {need}")
-
-
-def metaval(prop):
-    m = re.search(r'<meta (?:property|name)="%s" content="([^"]*)"' % re.escape(prop), html)
-    return m.group(1) if m else None
-
-
-for prop in ("og:image", "twitter:image"):
-    v = metaval(prop)
-    if not v:
-        ERR.append("missing " + prop)
-    elif not v.startswith(CANON):
-        ERR.append(f"{prop} must be absolute, crawlers drop relative: {v}")
-if not metaval("twitter:card"):
-    ERR.append("no twitter:card")
-for node in main["@graph"]:
-    imgv = node.get("image")
-    if isinstance(imgv, str) and not imgv.startswith(CANON):
-        ERR.append("JSON-LD image must be absolute: " + imgv)
-
-# Витринные данные магазина в JSON-LD обязаны совпадать с data.js: поисковик читает
-# именно их, а карточку на странице человек правит в другом месте.
-gs = next((n for n in main["@graph"] if n.get("@type") == "GroceryStore"), None)
-if not gs:
-    ERR.append("no GroceryStore node in JSON-LD (blind)")
+rv = re.search(r'<section[^>]*id="reviews"[\s\S]*?</section>', html)
+if not rv:
+    ERR.append("нет блока отзывов")
 else:
-    shop = json.loads(ctx.eval("JSON.stringify(SHOP)"))
-    dig = lambda v: re.sub(r"\D", "", str(v or ""))
-    if dig(gs.get("telephone")) != dig(shop["phone"]):
-        ERR.append("JSON-LD telephone drifted from SHOP.phone")
-    alt = [dig(x.get("telephone")) for x in (gs.get("alternateTelephone") or []) if isinstance(x, dict)]
-    if dig(shop["phone2"]) not in alt:
-        ERR.append("SHOP.phone2 is missing from JSON-LD alternateTelephone")
-    if not re.fullmatch(r"[₽$€£]", str(gs.get("priceRange", ""))):
-        ERR.append("priceRange must be a currency symbol, not prose: " + repr(gs.get("priceRange")))
-    oh = (gs.get("openingHoursSpecification") or [{}])[0]
-    if (oh.get("opens"), oh.get("closes")) != (shop["open"], shop["close"]):
-        ERR.append(f"JSON-LD hours {oh.get('opens')}-{oh.get('closes')} != SHOP {shop['open']}-{shop['close']}")
-    if len(oh.get("dayOfWeek") or []) != 7:
-        ERR.append("JSON-LD opening hours must list all 7 days")
-    geo = gs.get("geo") or {}
-    if abs(float(geo.get("latitude") or 0) - 59.957835) > 0.001 or abs(float(geo.get("longitude") or 0) - 30.30879) > 0.001:
-        ERR.append("JSON-LD geo drifted from the address on Сытнинская")
-    sameas = gs.get("sameAs") or []
-    if not any(str(shop["map"]).split("oid=")[-1].split("&")[0] in u for u in sameas):
-        ERR.append("JSON-LD sameAs does not point at the Yandex organisation from SHOP.map")
+    block = rv.group(0)
+    if "yandex.ru/sprav/widget/rating-badge" not in block:
+        ERR.append("блок отзывов без виджета Яндекс Карт — откуда тогда рейтинг?")
+    if "yandex.ru/maps/org/" not in block:
+        ERR.append("блок отзывов без ссылки на настоящие отзывы")
+    if re.search(r"<blockquote|review-text|fake-review", block):
+        ERR.append("в блоке отзывов появились hand-written цитаты — их никто не писал")
+    score = re.search(r'<div class="review-score">\s*<b[^>]*>([0-9],[0-9])</b>', block)
+    aria = re.search(r'aria-label="Оценка ([0-9],[0-9]) из 5"', block)
+    if not (score and aria):
+        ERR.append("блок отзывов: цифра рейтинга или её озвучка не найдены — гейт слепой")
+    elif score.group(1) != aria.group(1):
+        ERR.append(f"рейтинг {score.group(1)} разошёлся с озвученным {aria.group(1)}")
+    stars = block.count("#ic-star")
+    if not 4 <= stars <= 6:
+        ERR.append(f"в звёздном рейтинге {stars} звёзд")
 
-vis = re.findall(r'<details[^>]*>\s*<summary>(.*?)</summary>\s*<div class="faq-body">(.*?)</div>\s*</details>', html, re.S)
-if not vis:
-    ERR.append("FAQ visible blocks not parsed (blind)")
-elif len(vis) != len(faq):
-    ERR.append(f"FAQ count: visible {len(vis)} != JSON-LD {len(faq)}")
+ld_blocks = re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S)
+if len(ld_blocks) < 2:
+    ERR.append("ожидались JSON-LD магазина+FAQ и каталог от сборки")
+store = faq = catalog = None
+for b in ld_blocks:
+    try:
+        j = json.loads(b)
+    except Exception as exc:
+        ERR.append(f"JSON-LD не разбирается: {exc}")
+        continue
+    nodes = j.get("@graph", [j] if isinstance(j, dict) else [])
+    for node in nodes:
+        if node.get("@type") in ("GroceryStore", "Store", "SuperMarket", "FoodEstablishment"):
+            store = node
+        elif node.get("@type") == "FAQPage":
+            faq = node
+        elif node.get("@type") == "ItemList":
+            catalog = node
+if not store:
+    ERR.append("JSON-LD: нет карточки магазина")
+else:
+    for k in ("name", "telephone", "address", "openingHoursSpecification", "url"):
+        if k not in store:
+            ERR.append(f"JSON-LD: у магазина нет {k}")
+    if store.get("name") != BRAND:
+        ERR.append("JSON-LD: название магазина не совпадает с вывеской")
+    if store.get("url") != SITE_URL:
+        ERR.append(f"JSON-LD: url {store.get('url')} не равен canonical {SITE_URL}")
+    if not str(store.get("@id", "")).startswith(SITE_URL):
+        ERR.append("JSON-LD: @id магазина вне нашего домена")
+    street = store.get("address", {}).get("streetAddress", "")
+    if street and re.sub(r"\s+", " ", street.replace("\u00a0", " ")).strip().lower() not in plain.lower():
+        ERR.append(f"JSON-LD: адрес {street!r} не читается на странице")
+    hours = store.get("openingHoursSpecification", [{}])[0]
+    if len(store.get("openingHoursSpecification", [])) != 7 and hours.get("dayOfWeek") and len(hours["dayOfWeek"]) != 7:
+        NOTES.append("JSON-LD: часы заявлены не на все дни — проверить вывеску")
+    ld_phone = re.sub(r"\D", "", store.get("telephone", ""))
+    visible = {re.sub(r"\D", "", x) for x in re.findall(
+        r"\+7[\d\s()\-]{9,}", re.sub(r'<script type="application/ld\+json"[^>]*>[\s\S]*?</script>', " ", html))}
+    if ld_phone and ld_phone not in visible:
+        ERR.append("JSON-LD: телефон магазина не совпадает ни с одним видимым номером")
+def visible_faq_pairs(src):
+    pairs = []
+    for body in re.findall(r'<details class="faq-item"[^>]*>([\s\S]*?)</details>', src):
+        q = re.search(r"<summary>([\s\S]*?)</summary>", body)
+        a = re.search(r"<p>([\s\S]*?)</p>", body)
+        if q and a:
+            clean = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", s)).strip()
+            # «+» из декоративного span — не часть вопроса
+            pairs.append((clean(re.sub(r"<span>\+</span>", "", q.group(1))), clean(a.group(1))))
+    return pairs
 
 
-def plain(t):
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", t)).strip()
+faq_visible = visible_faq_pairs(html)
+faq_ld = [(q.get("name", ""), q.get("acceptedAnswer", {}).get("text", ""))
+          for q in (faq or {}).get("mainEntity", [])]
+if faq_visible and faq_ld != faq_visible:
+    ERR.append("JSON-LD FAQ разошёлся с вопросами и ответами, которые видит посетитель")
+if faq_visible and not faq:
+    ERR.append("FAQ на странице есть, а в JSON-LD его нет — поисковик не увидит ни одного вопроса")
+if faq:
+    for q in faq.get("mainEntity", []):
+        if not q.get("name") or not q.get("acceptedAnswer", {}).get("text"):
+            ERR.append("JSON-LD: вопрос FAQ без ответа")
+        if "цена" in q.get("name", "").lower() and "Whats" not in q.get("acceptedAnswer", {}).get("text", ""):
+            NOTES.append("FAQ про цены: сверить, что ответ ведёт в WhatsApp, а не обещает сумму")
+if catalog:
+    names = [i.get("name") for i in catalog.get("itemListElement", [])]
+    if len(names) != len(PRODUCTS):
+        ERR.append(f"ld-catalog: {len(names)} позиций против {len(PRODUCTS)} в js/data.js — сборка не прогнана")
+    elif set(names) != {p["name"] for p in PRODUCTS}:
+        ERR.append("ld-catalog разошёлся с каталогом")
+    if [i.get("position") for i in catalog.get("itemListElement", [])] != list(range(1, len(names) + 1)):
+        ERR.append("ld-catalog: позиции перепутаны")
 
+# ==================================================== 8. СБОРКА И ФАЙЛЫ =====
+build_src = (ROOT / "tools" / "build.py").read_text(encoding="utf-8")
+PS = re.search(r"PRODUCT_SIZES = \[([^\]]*)\]", build_src)
+GS = re.search(r"GALLERY_SIZES = \[([^\]]*)\]", build_src)
+if not PS or not GS:
+    ERR.append("build.py: не разобрать списки размеров — гейт слепой")
+else:
+    p_sizes = [tuple(map(int, s)) for s in re.findall(r"\((\d+),\s*(\d+)\)", PS.group(1))]
+    g_sizes = [tuple(map(int, s)) for s in re.findall(r"\((\d+),\s*(\d+)\)", GS.group(1))]
+    call_p = {tuple(map(int, s)) for s in re.findall(r"pexels\(p\.photo,\s*(\d+),\s*(\d+)\)", app_js)}
+    call_g = {tuple(map(int, s)) for s in re.findall(r"pexels\((?:g|item)\.photo,\s*(\d+),\s*(\d+)\)", app_js)}
+    for size in sorted(call_p - set(p_sizes)):
+        ERR.append(f"build.py не скачивает {size[0]}x{size[1]} — карточка останется без фото")
+    for size in sorted(call_g - set(g_sizes)):
+        ERR.append(f"build.py не скачивает галерейный {size[0]}x{size[1]}")
+    for size in sorted(set(p_sizes) - call_p - set(g_sizes) - set(call_g)):
+        NOTES.append(f"build.py тащит неиспользуемый размер товаров {size[0]}x{size[1]}")
+    if not re.search(r"pexels\(", app_js):
+        ERR.append("js/app.js не вызывает pexels() — картинки собираются незнамо откуда")
+    want = {f"{p['photo']}-{w}x{h}.jpg" for p in PRODUCTS for w, h in p_sizes}
+    want |= {f"{g['photo']}-{w}x{h}.jpg" for g in GALLERY for w, h in g_sizes}
+    want |= {f"{m[0]}-{m[1]}x{m[2]}.jpg" for m in re.findall(r"assets/img/(\d+)-(\d+)x(\d+)\.jpg", html)}
+    if not SKIP:
+        for f in sorted(want):
+            if not (ROOT / "assets" / "img" / f).exists():
+                ERR.append(f"нет собранного фото assets/img/{f}")
+        live_ids = {str(p["photo"]) for p in PRODUCTS} | {str(g["photo"]) for g in GALLERY}
+        orphan = sorted(p.name for p in (ROOT / "assets" / "img").glob("*.jpg") if p.name.split("-")[0] not in live_ids)
+        if orphan:
+            ERR.append("в assets/img мусор от снятых позиций: " + ", ".join(orphan[:5]))
+        heavy = sorted((ROOT / "assets" / "img").glob("*.jpg")) + [ROOT / "assets" / "og.png"]
+        big = [f"{p.relative_to(ROOT).as_posix()} {p.stat().st_size // 1024} KB" for p in heavy
+               if p.exists() and p.stat().st_size > 260_000]
+        if big:
+            ERR.append("фото не прожаты (тяжёлый первый экран): " + ", ".join(big[:4]))
 
-for i, (q, a) in enumerate(vis):
-    if i >= len(faq):
-        break
-    if plain(q) != plain(faq[i]["name"]):
-        ERR.append(f"FAQ#{i} question differs from JSON-LD")
-    if plain(a) != plain(faq[i]["acceptedAnswer"]["text"]):
-        ERR.append(f"FAQ#{i} answer differs from JSON-LD")
+fonts_css_path = ROOT / "assets" / "fonts.css"
+families = set()
+for val in re.findall(r"font-family:([^;}]+)", css):
+    for part in val.split(","):
+        part = part.strip().strip("'\"")
+        if part and part not in GENERIC_FONTS:
+            families.add(part)
+if SKIP:
+    NOTES.append("пропущена проверка собранных ассетов (--skip-assets)")
+else:
+    if not fonts_css_path.exists():
+        ERR.append("нет assets/fonts.css — сборка не прогнана")
+    else:
+        fcss = fonts_css_path.read_text(encoding="utf-8")
+        faces = re.findall(r'@font-face\{font-family:"([^"]+)";font-style:(\w+);font-weight:(\d+)', fcss)
+        if not faces:
+            ERR.append("assets/fonts.css без @font-face")
+        have_families = {f for f, _, _ in faces}
+        for fam in sorted(families - have_families):
+            ERR.append(f"css зовёт гарнитуру {fam}, которой нет в assets/fonts.css — браузер подставит системную")
+        for fam in sorted(have_families - families):
+            ERR.append(f"шрифт {fam} скачан, но в css не вызывается — лишние байты каждому гостю")
+        weights = {}
+        for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+            fam_m = re.search(r"font-family:\s*'([^']+)'", body)
+            w_m = re.search(r"font-weight:\s*(\d+)", body)
+            if fam_m and w_m:
+                weights.setdefault(fam_m.group(1), set()).add(int(w_m.group(1)))
+        for fam, ws in sorted(weights.items()):
+            have_w = {int(w) for f, _, w in faces if f == fam}
+            for w in sorted(ws - have_w):
+                ERR.append(f"{fam} {w}: вес вызывается, а face не скачан (есть {sorted(have_w)})")
+        for url in re.findall(r'url\("([^"]+\.woff2)"\)', fcss):
+            if not (fonts_css_path.parent / url).exists():
+                ERR.append(f"fonts.css зовёт отсутствующий {url}")
+        if "font-display:swap" not in fcss:
+            ERR.append("шрифты без font-display:swap — текст мигает при загрузке")
 
-forms = set(re.findall(r"\d\d:\d\d([–—-])\d\d:\d\d", html))
-if len(forms) > 1:
-    ERR.append("hours use mixed dash forms: " + repr(sorted(forms)))
-elif forms:
-    dash = next(iter(forms))
-    bsrc = (ROOT / "tools" / "build.py").read_text(encoding="utf-8")
-    for other in set(re.findall(r"\d\d:\d\d([–—-])\d\d:\d\d", bsrc)) - {dash}:
-        ERR.append(f"build.py writes hours with '{other}', site uses '{dash}'")
+for u in re.findall(r'url\("([^"]+)"\)', css):
+    if u.startswith(("data:", "http")):
+        continue
+    if not (css_path.parent / u).exists() and not (ROOT / u.lstrip("./")).exists() and not SKIP:
+        ERR.append(f'css: url("{u}") ведёт в никуда')
+for tag, dd, line in doc.tags:
+    if tag in ("link", "script"):
+        target = dd.get("href") or dd.get("src") or ""
+        if target.startswith(("js/", "css/", "assets/", "manifest")) and not (ROOT / target).exists() and not SKIP:
+            ERR.append(f"head: нет файла {target}")
 
-SELF_HOST, EMBEDS = "ssrjkk.github.io", {"yandex.ru"}
-hosts = {m.group(1).lower() for m in re.finditer(r'<(?:iframe|script|img|link)[^>]+(?:src|href)="https?://([^/"\']+)/', html)}
-undeclared = (hosts - {SELF_HOST}) - EMBEDS
+manifest = json.loads((ROOT / "manifest.webmanifest").read_text(encoding="utf-8"))
+if manifest.get("name") != BRAND:
+    ERR.append(f"манифест: name {manifest.get('name')!r} не равен вывеске")
+for icon in manifest.get("icons", []):
+    if not (ROOT / icon["src"]).exists() and not SKIP:
+        ERR.append(f"манифест: нет иконки {icon['src']}")
+    if not re.fullmatch(r"\d+x\d+", icon.get("sizes", "")):
+        ERR.append(f"манифест: sizes иконки {icon['src']} кривые")
+if not any(i.get("purpose") == "maskable" for i in manifest.get("icons", [])):
+    ERR.append("манифест: нет maskable-иконки — на Android край обрежут")
+for key in ("background_color", "theme_color"):
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", manifest.get(key, "")):
+        ERR.append(f"манифест: {key} должен быть #RRGGBB")
+tm = " ".join(metas(doc, "theme-color"))
+if tm.lower() != manifest.get("theme_color", "").lower():
+    ERR.append(f"theme-color в <head> ({tm}) и в манифесте ({manifest.get('theme_color')}) разошёлся")
+if manifest.get("start_url") != "./" or manifest.get("scope") != "./":
+    ERR.append("манифест: start_url/scope обязаны быть './' — сайт живёт в подпадке Pages")
+
+sw_src = (ROOT / "sw.js").read_text(encoding="utf-8")
+core_list = re.search(r"CORE\s*=\s*\[([^\]]*)\]", sw_src)
+core = re.findall(r'"(\./[^"]*)"', core_list.group(1)) if core_list else []
+if not core:
+    ERR.append("sw.js: пустой CORE — офлайн-режим не соберётся")
+for f in core:
+    rel = f[2:]
+    if rel and not (ROOT / rel).exists() and not SKIP:
+        ERR.append(f"sw.js кэширует несуществующий {f}")
+for must in ("./index.html", "./css/style.css", "./js/app.js", "./js/data.js", "./js/app-head.js",
+             "./assets/fonts.css", "./manifest.webmanifest"):
+    if must not in core:
+        ERR.append(f"sw.js: оболочка офлайна неполная — нет {must}")
+if "assets/img" in sw_src:
+    ERR.append("sw.js тащит фото в прекеши: это мегабайты, а не оболочка")
+for retired in ("js/main.js", "js/theme.js", "css/themes.css", "vendor/", "assets/qr.png"):
+    if retired in sw_src or retired in html or retired in js:
+        ERR.append(f"след удалённого файла {retired} всё ещё подключается")
+if not re.search(r"navigator\.serviceWorker\.register", js):
+    ERR.append("sw.js лежит в репозитории, но его никто не регистрирует")
+
+# ================================================== 9. CSS: ПАЛИТРЫ И ПРАВИЛА ====
+palettes = {}
+for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css, re.S):
+    sel = " ".join(sel.split())
+    keys = re.findall(r'html\[data-theme="([a-z]+)"\]', sel)
+    if ":root" in sel:
+        keys.append("root")
+    if not keys or not re.search(r"--[a-z0-9-]+\s*:", body):
+        continue
+    for key in keys:
+        palettes[key] = palettes.get(key, "") + body
+if not palettes:
+    ERR.append("CSS: ни одной палитры не разобрано")
+default_vars = set(re.findall(r"(--[a-z0-9-]+)\s*:", palettes.get("root", "") + palettes.get(DEFAULT_THEME, "")))
+if not default_vars:
+    ERR.append("CSS: в дефолтной палитре нет ни одного токена — красить нечем")
+for name, body in palettes.items():
+    if name == "root":
+        continue
+    missing = sorted(default_vars - set(re.findall(r"(--[a-z0-9-]+)\s*:", body)))
+    if missing:
+        ERR.append(f'[data-theme="{name}"] не переопределяет токены: {", ".join(missing[:6])}'
+                   + ("…" if len(missing) > 6 else ""))
+declared_themes = set(data["T"])
+css_themes = {n for n in palettes if n != "root"}
+if declared_themes != css_themes:
+    ERR.append(f"темы разошлись: data.js {sorted(declared_themes)} против css {sorted(css_themes)}")
+swatch_themes = set(re.findall(r'data-set-theme="([a-z]+)"', html))
+if swatch_themes != declared_themes:
+    ERR.append(f"переключатель предлагает {sorted(swatch_themes)}, а палитр заявлено {sorted(declared_themes)}")
+if DEFAULT_THEME not in declared_themes:
+    ERR.append(f"дефолтная палитра {DEFAULT_THEME} не объявлена в THEME_LABELS")
+labels = set(data["T"].values())
+for lbl in sorted(labels):
+    if lbl not in html:
+        ERR.append(f"подпись палитры «{lbl}» нигде не показана")
+
+var_refs = set(re.findall(r"var\(\s*(--[a-z0-9-]+)", css))
+js_written = {"--" + v for v in re.findall(r"setProperty\(\s*['\"]--([\w-]+)", js) + re.findall(r"--([a-z0-9-]+)\s*:", js)}
+undeclared = sorted(var_refs - set(re.findall(r"(--[a-z0-9-]+)\s*:", css)) - js_written)
 if undeclared:
-    ERR.append("undeclared third-party embed hosts: " + repr(sorted(undeclared)))
-if EMBEDS & hosts:
-    if re.search(r"сторонних трекеров", html):
-        ERR.append("page embeds third-party origins but still claims 'нет сторонних трекеров'")
-    if "cookie" not in html.lower():
-        ERR.append("third-party embed present without cookie disclosure")
+    ERR.append("css зовёт незадекларированные переменные: " + ", ".join(undeclared[:8]))
+if css.count("{") != css.count("}"):
+    ERR.append(f"css: скобки не сходятся ({css.count('{')} против {css.count('}')})")
+flat = squash(css)
+for prop in ("backdrop-filter",):
+    for v in sorted({x for x in re.findall(r"[;{]" + prop + r":([^;}]+)", flat)}):
+        if f"-webkit-{prop}:{v}" not in flat:
+            ERR.append(f"css: {prop}:{v.strip()} без -webkit- — на Safari стекло потухнет")
 
-sw = (ROOT / "sw.js").read_text(encoding="utf-8")
-core = re.findall(r'"\./([^"]*)"', sw)
-if len(core) < 10:
-    ERR.append(f"sw CORE has only {len(core)} entries (blind)")
-shell = set(re.findall(r'<link rel="(?:stylesheet|manifest)" href="([^"]+)"', html)) | set(re.findall(r'<script[^>]+src="([^"]+)"', html))
-notcached = sorted(s for s in shell if not s.startswith(("http", "//")) and s not in core)
-if notcached:
-    ERR.append("not precached, offline shell incomplete: " + repr(notcached))
-heavy, tot = [], 0
-for u in ["index.html", "404.html"] + core:
-    f = ROOT / u
-    if u and f.is_file():
-        sz = f.stat().st_size
-        tot += sz
-        if sz > 200_000:
-            heavy.append((u, sz))
-if heavy:
-    ERR.append("precache carries display-only bulk: " + repr(heavy))
-if tot > 1_200_000:
-    ERR.append(f"sw precache total {tot} B > 1.2 MB")
-
-og = ROOT / "assets" / "og.png"
-if og.exists() and og.stat().st_size > 260_000:
-    ERR.append(f"og.png {og.stat().st_size} B > 260 KB — every link preview pays this")
-
-def css_blocks(text, marker):
-    out, i = [], 0
-    while True:
-        j = text.find(marker, i)
-        if j < 0:
-            return out
-        k, depth, e = text.find("{", j), 0, text.find("{", j)
-        while e < len(text):
-            if text[e] == "{":
-                depth += 1
-            elif text[e] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            e += 1
-        out.append(text[k + 1:e])
-        i = e
+# --- контраст токенов ------------------------------------------------------
+# Пиксели меряет headless-прогон, но разъехавшийся токен палитры видно и здесь:
+# так регресс («осветлили --accent») ловится до сборки, а не после снимка экрана.
+def _lin(x):
+    x /= 255
+    return x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
 
 
-if css_text := next((c for c in [str(ROOT / "css" / "style.css")] if Path(c).exists()), ""):
-    css = Path(css_text).read_text(encoding="utf-8")
-    if not re.search(r"\.rail a::before[^{]*\{[^}]*inset:-\d+px", css):
-        ERR.append("rail dots lost their enlarged hit area (.rail a::before inset)")
-    pblk = "".join(css_blocks(css, "@media print"))
-    if not pblk:
-        ERR.append("no @media print block: dark sections print as a black sheet")
-    else:
-        need = {
-            "white sheet (background:#fff)": "background:#fff",
-            "black text (color:#000)": "color:#000",
-            "decor stripped (background-image:none)": "background-image:none",
-            "cards not split across pages (break-inside:avoid)": "break-inside:avoid",
-            "link targets on paper (attr(href))": "attr(href)",
-        }
-        for label, needle in need.items():
-            if needle not in pblk:
-                ERR.append("print: missing " + label)
-        if not re.search(r"#mapBox\{[^}]*display:none", pblk):
-            ERR.append("print: the Yandex iframe is not hidden (#mapBox display:none)")
-        src_all = html + sw + (ROOT / "js" / "main.js").read_text(encoding="utf-8") \
-            + (ROOT / "js" / "data.js").read_text(encoding="utf-8")
-        dead = sorted({c for b in css_blocks(css, "@media print")
-                       for sel in re.findall(r"(?:^|[};])([^{};]+)\{", b)
-                       for c in re.findall(r"\.([A-Za-z][\w-]*)", sel)
-                       if not re.search(r"[\"'\s.:-]" + re.escape(c) + r"\b", src_all)})
-        if dead:
-            ERR.append("print rules name classes the markup never uses: " + repr(dead[:8]))
-
-CSS_MAIN = (ROOT / "css" / "style.css").read_text(encoding="utf-8")
-VARS = dict(re.findall(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{6})\b", CSS_MAIN.split("}", 1)[0]))
+def _lum(rgb):
+    r, g, b = rgb
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
 
 
-def col(v):
-    if isinstance(v, tuple):
-        return v
-    if v.startswith("--"):
-        if v not in VARS:
-            return (0, 0, 0)          # отсутствующий токен отдельный гейт репортит
-        v = VARS[v]
-    m = re.match(r"rgba?\(([^)]+)\)", v)
-    if m:
-        p = [float(x) for x in re.split(r"[ ,/]+", m.group(1).strip()) if x]
-        return (p[0], p[1], p[2], p[3] if len(p) > 3 else 1.0)
-    return (int(v[1:3], 16), int(v[3:5], 16), int(v[5:7], 16))
+def _ratio(fg, bg):
+    a, b = _lum(fg), _lum(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
 
 
-def chan(c):
-    c /= 255.0
-    return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-
-
-def lum(c):
-    return 0.2126 * chan(c[0]) + 0.7152 * chan(c[1]) + 0.0722 * chan(c[2])
-
-
-def ratio(a, b):
-    la, lb = lum(a), lum(b)
-    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
-
-
-def fold(base, layers):
-    out = col(base)
-    for spec in layers:
-        c = col(spec[0])
-        out = tuple(c[i] * spec[1] + out[i] * (1 - spec[1]) for i in range(3))
-    return out
-
-
-# (метка, цвет текста, непрозрачная подложка, слои поверх неё снизу вверх, минимальный контраст)
-# Числа сверены с реальным DOM 1366x900 и с покомпонентным смешиванием.
-PAIRS = [
-    ("product badge caption", "#ffffff", "--persimmon-d", [], 4.5),
-    ("promo heading", "--quince-l", "--leaf-d", [("--persimmon", 0.36)], 3.0),
-    ("promo body", "#eae2d7", "--leaf-d", [("--persimmon", 0.36)], 4.5),
-    ("season month chip", "--parch", "--leaf-d", [], 4.5),
-    ("map placeholder hint", "--map-ink", "#e9e3d6", [("--leaf", 0.16)], 4.5),
-    ("hero ticker line", "--chip-ink", "--fig2", [("--persimmon", 0.28)], 4.5),
-    ("hero rating number", "--quince-hi", "--fig2", [("--persimmon", 0.28), ("#ffffff", 0.10)], 4.5),
-    ("basket composition chips", "--chip-ink", "--fig2", [("--persimmon", 0.26)], 4.5),
-    ("muted body copy", "--muted", "--parch", [], 4.5),
-    ("muted copy on surface", "--muted", "--surface", [], 4.5),
-    ("accent link on paper", "--persimmon-d", "--parch", [], 4.5),
-    # По замерам с реальных пикселей зерно и виньетка съедают светимость бумаги:
-    # подпись .overline лежит на #f1e8da, а не на токене --parch.
-    ("accent label on grained paper", "--persimmon-d", "#f1e8da", [], 4.5),
-    ("footer links", "#e6dcd3", "--fig", [], 4.5),
-    ("primary button label", "#2b1a06", "--persimmon", [], 4.5),
-    ("whatsapp button label", "#062718", "#22c55e", [], 4.5),
-]
-
-# Блик на бейдже — прозрачный белый слой поверх подписи. Считаем его по тому же
-# alpha, что лежит в CSS, иначе гейт расходится с картинкой.
-_sheen = re.search(r"\.p-badge::after\{[^}]*rgba\(255,\s*255,\s*255,\s*([.\d]+)\)", CSS_MAIN)
-if not _sheen:
-    SHEEN = 0.0
-    ERR.append("контракт бейджа: блик .p-badge::after не найден — светлую полосу над подписью нечем проверить")
-else:
-    SHEEN = float(_sheen.group(1))
-    if SHEEN > 0.20:
-        ERR.append(f"блик бейджа rgba(255,255,255,{SHEEN:g}) светлее 0.20: белая подпись на пике блика уходит под 4.5")
-    PAIRS.append(("badge caption under sheen", "#ffffff", "--beet", [("#ffffff", SHEEN)], 4.5))
-for label, fg, base, over, need in PAIRS:
-    rt = ratio(col(fg), fold(base, over))
-    if rt < need:
-        ERR.append(f"contrast {label}: {rt:.2f} < {need}")
-
-RULE_CONTRACT = [
-    (".p-badge", ["var(--persimmon-d)"], "badge gradient lightened back onto persimmon"),
-    (".promo", ["var(--leaf-d)"], "promo block no longer uses the dark produce green"),
-    (".month.on", ["var(--leaf-d)"], "active month chip no longer uses the dark produce green"),
-    (".hero-rating b", ["var(--quince-hi)"], "rating number lost its brightened token"),
-    (".compose span", ["var(--chip-ink)"], "composition chips lost their readable ink"),
-    (".hero-ticker", ["var(--chip-ink)"], "ticker line lost its readable ink"),
-    (".map-ph", ["var(--map-ink)"], "map placeholder hint lost its ink"),
-]
-for sel, needles, why in RULE_CONTRACT:
-    m = re.search(re.escape(sel) + r"\s*\{([^}]*)\}", CSS_MAIN)
-    if not m:
-        ERR.append(f"contrast contract: rule {sel} not found ({why})")
-    elif any(n not in m.group(1) for n in needles):
-        ERR.append(f"contrast contract broken at {sel}: {why}")
-for tok in ("--leaf-d", "--map-ink", "--chip-ink", "--quince-hi", "--ring", "--ring-dark"):
-    if tok not in VARS:
-        ERR.append(f"contrast contract: token {tok} missing from :root")
-
-# Контракт видимого фокуса: одно кольцо на весь сайт, вариант для тёмных плоскостей,
-# и никто не имеет права гасить outline.
-fv = re.search(r":focus-visible\{([^}]*)\}", CSS_MAIN)
-if not fv:
-    ERR.append("no :focus-visible ring contract rule")
-else:
-    fm = re.search(r"outline:\s*(\d+)px\s+solid\s+var\((--[\w-]+)\)", fv.group(1))
-    if not fm:
-        ERR.append(":focus-visible contract is not a solid outline of a colour token")
-    else:
-        if int(fm.group(1)) < 3:
-            ERR.append(f"focus ring thinner than 3px: {fm.group(1)}px")
-        if fm.group(2) != "--ring":
-            ERR.append("focus ring must use the --ring token, not " + fm.group(2))
-dark_ring = " ".join(re.findall(r"([^{}]*:focus-visible)\{outline-color:var\(--ring-dark\)\}", CSS_MAIN))
-DARK_SCOPES = (".hero", ".promo", ".p-media", ".sec-dark", ".site-foot", "#lightbox")
-if not dark_ring:
-    ERR.append("no light focus ring for dark surfaces (outline-color:var(--ring-dark))")
-else:
-    lost = [s for s in DARK_SCOPES if s + " :focus-visible" not in dark_ring]
-    if lost:
-        ERR.append("dark surfaces without the light focus ring: " + repr(lost))
-if not re.search(r"input:focus-visible\{outline:3px solid var\(--ring\)", CSS_MAIN):
-    ERR.append("the search field lost its own focus ring rule (it sits inside a pill wrapper)")
-dead_ring = re.findall(r"[^{}]{0,70}outline\s*:\s*(?:none|0)\s*[;}]", CSS_MAIN)
-if dead_ring:
-    ERR.append("outline:none/0 kills a focus ring: " + repr([d.strip()[-56:] for d in dead_ring[:3]]))
-# WCAG 1.4.11: граница фокуса обязана давать 3:1 к фону, на котором её видят.
-for tok, bgs in (("--ring", (("paper", "--surface"), ("parchment", "--parch"))),
-                 ("--ring-dark", (("fig", "--fig"), ("fig2", "--fig2"), ("fig3", "--fig3")))):
-    for label, bg in bgs:
-        rt = ratio(col(tok), col(bg))
-        if rt < 3.0:
-            ERR.append(f"contrast focus ring {tok} on {label}: {rt:.2f} < 3.0 (WCAG 1.4.11)")
-
-# --- Гейт «кольцо доезжает до всех сторон» ------------------------------------
-# Зеркало пиксельной проверки fs_focus3: outline рисуется СНАРУЖИ border-box'а
-# (3px + offset 3px = 6px), а любой ancestor с overflow режет его. Either у
-# клиппера запас под кольцо, либо кольцо вписано внутрь самого элемента.
-def css_last_decl(sel, prop):
-    """Значение свойства из последнего выигрывающего правила (каскад = порядок в файле)."""
-    for body in reversed(re.findall(r"(?<![\w-])" + re.escape(sel) + r"\{([^{}]*)\}", CSS_MAIN)):
-        d = re.search(r"(?:^|;)\s*" + re.escape(prop) + r":([^;]*)", body)
-        if d:
-            return d.group(1).strip()
-    return None
-
-SIDES = ("top", "right", "bottom", "left")
-
-def css_px4(value):
-    # 'padding:0' и 'margin:0 -7px' — те же 0px; без подмены нулевой шортханд более
-    # специфичного правила вообще не доходил до сравнения каскада.
-    v = re.sub(r"(?<![\w.%-])0(?![\w.%])", "0px", value or "")
-    n = [float(x) for x in re.findall(r"(-?[\d.]+)px", v)]
-    if len(n) == 1:
-        n = n * 4
-    elif len(n) == 2:
-        n = [n[0], n[1], n[0], n[1]]
-    elif len(n) == 3:
-        n = [n[0], n[1], n[2], n[1]]
-    return n if len(n) == 4 else []
-
-def css_spec(sel):
-    """Специфичность: id / (классы, атрибуты, псевдоклассы) / элементы."""
-    n_id = len(re.findall(r"#[\w-]+", sel))
-    n_cls = len(re.findall(r"\.[\w-]+|\[[^\]]*\]|:[\w-]+", sel))
-    n_el = len(re.findall(r"(?<![\w.#:-])[a-z][\w-]*", sel))
-    return n_id * 100 + n_cls * 10 + n_el
-
-def css_sides(chain, prop):
-    """{сторона: (ключ, значение)} победившего каскада для элемента, описанного цепью
-    chain ('.gal .swiper-wrapper'). Победитель — (специфичность, порядок в файле), а не
-    порядок сам по себе: иначе правило html.swiper-on .gal .swiper-wrapper{padding-bottom:0}
-    обходит запись .gal .swiper-wrapper{padding:7px} в браузере, а гейт про это молчит —
-    ровно та ловушка, что срезала кольцо плиток галереи снизу (замер фокуса, 390/1440)."""
-    eff = {}
-    def win(side, key, val):
-        prev = eff.get(side)
-        if prev is None or key > prev[0]:
-            eff[side] = (key, val)
-    for ri, m in enumerate(re.finditer(r"([^{}]+)\{([^{}]*)\}", CSS_MAIN)):
-        sels, body = m.group(1), m.group(2)
-        if sels.lstrip().startswith("@"):
-            continue
-        for s in (" ".join(x.split()) for x in sels.split(",")):
-            if s != chain and not s.endswith(" " + chain):
-                continue
-            key = (css_spec(s), ri)
-            decls = dict(re.findall(r"([a-z-]+)\s*:\s*([^;]*)", body))
-            if prop in decls:
-                n = css_px4(decls[prop])
-                if len(n) == 4:
-                    for side, v in zip(SIDES, n):
-                        win(side, key, v)
-            for side in SIDES:
-                v = decls.get(prop + "-" + side)
-                if v is not None:
-                    n = css_px4(v)
-                    win(side, key, n[0] if n else 0.0)
-    return eff
-
-def css_side_span(chain, prop):
-    """Четыре победившие стороны или None, если каскад закрывает не всё."""
-    eff = css_sides(chain, prop)
-    return [eff[s][1] for s in SIDES] if len(eff) == 4 else None
-
-# Скролл-рельсы режут по padding-боксу: 6px запаса обязано остаться на каждой из четырёх
-# сторон ПОСЛЕ каскада — иначе кольцо режет правило, которого гейт не видел.
-for chain, why in ((".pills", "ряд фильтров"), (".months", "ряд месяцев"),
-                   (".lb-thumbs", "миниатюры лайтбокса"), (".gal .swiper-wrapper", "плитки галереи")):
-    sides = css_side_span(chain, "padding")
-    if sides is None or min(sides) < 6:
-        ERR.append(f"фокус-кольцо обрежется в {chain} ({why}): запас по худшей стороне {None if sides is None else min(sides)}px, нужно >=6px")
-# Галерея: .gal не скроллится, но режет по своему боксу — клиппинг расширяем маргином
-# наружу, а плитки держим на прежних координатах padding'ом внутреннего wrapper.
-gal_m = css_side_span(".gal", "margin")
-if gal_m is None or max(gal_m) > -6:
-    ERR.append(f"фокус-кольцо плитки обрежет .gal: margin по лучшей стороне {None if gal_m is None else max(gal_m)}px, нужно <=-6px")
-# Кольцо прижатому к краю контейнера элементу рисуем ВНУТРИ border-box'а.
-for sel, why in ((".step button", "счётчик"), (".faq summary", "строка FAQ"), (".skip", "skip-ссылка")):
-    off = css_last_decl(sel + ":focus-visible", "outline-offset")
-    if not off or not off.startswith("-"):
-        ERR.append(f"фокус-кольцо {sel} ({why}) обязано быть вписанным (outline-offset отрицательный), сейчас {off!r}")
-# Тап-цель точки пагинации галереи: WCAG 2.5.8 требует не меньше 24×24 CSS px.
-bw, bh = css_last_decl(".gal-dots .swiper-pagination-bullet", "width"), css_last_decl(".gal-dots .swiper-pagination-bullet", "height")
-if not bw or not bh or float(re.sub(r"[^\d.]", "", bw) or 0) < 24 or float(re.sub(r"[^\d.]", "", bh) or 0) < 24:
-    ERR.append(f"тап-цель точки пагинации меньше 24px: {bw}×{bh} (WCAG 2.5.8)")
-if not re.search(r"\.gal-dots \.swiper-pagination-bullet::before\{[^}]*background:var\(--fig\)", CSS_MAIN):
-    ERR.append("точка пагинации потеряла кружок на ::before: 24px бокс станет серым квадратом")
-
-# --- Гейт тап-цели 44px на сенсоре ---------------------------------------------
-# Замер headless Chrome на 390×844 с touch-эмуляцией (matchMedia('(pointer: coarse)')
-# в нём true): «В корзину» была 36px, фильтры 39px, кнопки темы 34px, «−»/«+» в
-# корзине 29×29px, ссылки в подвале 26px. WCAG 2.5.8 (24px) они проходили и раньше,
-# но пальцем попадают в эти боксы каждый заказ, поэтому держим планку 2.5.5 (44px).
-# Порог объявлен ТОЛЬКО внутри @media (pointer:coarse) — под мышью и тачпадом
-# вёрстка остаётся компактной. Значит и гейт обязан читать этот блок, а не файл
-# целиком: то же правило вне блока означало бы, что кнопки выросли на десктопе.
-def media_body(text, header):
-    """Тело @media-блока; скобки считаем, потому что минифицированный CSS — одна строка."""
-    i = text.find(header)
-    if i < 0:
+def _color(val):
+    if not val:
         return None
-    depth = 0
-    for j in range(i, len(text)):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[i + len(header):j]
-    return None
-
-
-def coarse_of(text):
-    return media_body(text, "@media (pointer:coarse){") or media_body(text, "@media(pointer:coarse){")
-
-
-COARSE = coarse_of(CSS_MAIN)
-if COARSE is None:
-    ERR.append("пропал @media (pointer:coarse): тап-цель 44px на сенсоре нечем проверить")
-    COARSE = ""
-TCH = ROOT / "css" / "themes.css"
-COARSE_T = coarse_of(TCH.read_text(encoding="utf-8")) if TCH.exists() else None
-
-
-def coarse_decl(sel, prop, body=None):
-    """Последнее объявление свойства среди правил блока (селекторы через запятую — поштучно)."""
-    val = None
-    for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", body if body is not None else COARSE):
-        if sel not in [" ".join(s.split()) for s in m.group(1).split(",")]:
-            continue
-        d = re.search(r"(?:^|;)\s*" + re.escape(prop) + r":([^;]*)", m.group(2))
-        if d:
-            val = d.group(1).strip()
-    return val
-
-
-def pxnum(v):
-    n = re.findall(r"(-?[\d.]+)px", v or "")
-    return float(n[0]) if n else None
-
-
-for _sel, _why in ((".pill", "фильтр категории"), (".p-add", "«В корзину» на карточке"),
-                   (".btn-s", "мелкие кнопки в диалогах"), (".hero-rating", "ссылка на рейтинг в hero"),
-                   (".tab", "вкладки советов"), (".seg button", "размер набора в конструкторе"),
-                   (".foot-col a", "ссылки в подвале")):
-    _v = pxnum(coarse_decl(_sel, "min-height"))
-    if _v is None or _v < 44:
-        ERR.append(f"тап-цель {_sel} ({_why}) на сенсоре {coarse_decl(_sel, 'min-height')!r}, нужно min-height>=44px (WCAG 2.5.5)")
-if COARSE_T is None:
-    ERR.append("в css/themes.css нет @media (pointer:coarse): кнопки темы снова 34px под пальцем")
-else:
-    _v = pxnum(coarse_decl(".ts-opts button", "min-height", COARSE_T))
-    if _v is None or _v < 44:
-        ERR.append(f"тап-цель .ts-opts button (переключатель тем) на сенсоре {coarse_decl('.ts-opts button', 'min-height', COARSE_T)!r}, нужно min-height>=44px (WCAG 2.5.5)")
-# Счётчик количества: бокс растит сам грид-кнопке (place-items:center), перерыва с
-# соседним «−»/«+» нет — между центрами 100px, так что зоны не слипаются.
-for _sel in (".step button", ".step.mini button"):
-    _w, _h = pxnum(coarse_decl(_sel, "width")), pxnum(coarse_decl(_sel, "height"))
-    if not _w or not _h or min(_w, _h) < 44:
-        ERR.append(f"счётчик в корзине ({_sel}) на сенсоре {_w}×{_h}px, нужно 44×44 (WCAG 2.5.5)")
-# Иконки, у которых бокс раздвигать нельзя (белое сердце легло бы на фото, круглый
-# крестик — на поле): зона нажатия растёт псевдоэлементом, как у .rail a и точек
-# галереи. Считаем от базового бокса: 34+2*5 и 40+2*2 дают ровно 44.
-for _psel, _bsel, _why in ((".p-fav::before", ".p-fav", "сердечко избранного на карточке"),
-                           (".close-x::before", ".close-x", "крестик диалога")):
-    _base = pxnum(css_last_decl(_bsel, "height"))
-    _ins = pxnum(coarse_decl(_psel, "inset"))
-    if _base is None or _ins is None or _base + 2 * abs(_ins) < 44:
-        ERR.append(f"зона нажатия {_psel} ({_why}): бокс {_base}px + 2*{abs(_ins or 0)}px < 44px на сенсоре")
-if coarse_decl(".close-x", "position") != "relative":
-    ERR.append("крестику диалога сняли position:relative: зона нажатия уедет с кнопки на .cart-head")
-# У крестика поля высоты в CSS нет (22px набираются иконкой 15px + padding 1px — замер
-# 390×844), поэтому базовый бокс здесь константа, а проверка идёт по обеим осям.
-_sc = [abs(float(x)) for x in re.findall(r"(-?[\d.]+)px", coarse_decl("#searchClear::before", "inset") or "")]
-_v = _sc[0] if _sc else 0.0
-_h = _sc[1] if len(_sc) > 1 else _v
-if 22 + 2 * _v < 44 or 32 + 2 * _h < 44:
-    ERR.append(f"зона нажатия #searchClear::before: {22 + 2 * _v:.0f}×{32 + 2 * _h:.0f}px, нужно 44×44 на сенсоре")
-
-# --- Гейт геометрии иконок ---------------------------------------------------
-# Пороги сняты с замера живых пикселей (headless Chrome, растер 16/20 px) и
-# пересчитаны офлайн тем же движком: icon_geom воспроизводит те же числа, поэтому
-# CI кусается без браузера. Каждый пункт — про то, что видно глазом, а не про вкус.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import icon_geom as IG
-
-MIN_SUBLEN = 4.0      # короче — это точка, а не штрих: глаз читает мусор
-MIN_COMP16 = 10       # связный кусок силыэта на 16 px меньше — обрывок
-INK_LO, INK_HI = 0.05, 0.36   # доля залитых пикселей на 20 px: воздух или каша
-ALPHA_FLOOR = 0.45    # средняя плотность чернил вдоль осевой линии на 16 px
-DEV_STROKE_FLOOR = 1.30       # устройств-пикселей в самом мелком реальном размере
-IOU_CAP = 0.55        # выше — два глифа неотличимы друг от друга
-# Стрелки «назад/вперёд» и «−/+» зеркальны по смыслу и обязаны быть похожи.
-TWIN_OK = {frozenset(("i-left", "i-right")), frozenset(("i-minus", "i-plus"))}
-
-ic_rule = re.search(r"\.ic\{([^}]*)\}", CSS_MAIN)
-ic_sw = None
-if not ic_rule:
-    ERR.append("no .ic base rule: icon stroke contract cannot be measured")
-else:
-    body = ic_rule.group(1).replace(" ", "")
-    m = re.search(r"stroke-width:([\d.]+)", body)
+    val = val.strip()
+    if val.startswith("#"):
+        h = val[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) not in (6, 8):
+            return None
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4)), 1.0
+    m = re.match(r"rgba?\(([^)]+)\)", val)
     if not m:
-        ERR.append(".ic lost stroke-width: sprite inherits it, glyphs go hairline")
-    else:
-        ic_sw = float(m.group(1))
-    for need in ("stroke:currentColor", "fill:none", "stroke-linecap:round", "stroke-linejoin:round"):
-        if need not in body:
-            ERR.append(f".ic lost {need}: every icon in the sprite renders wrong without it")
-    sizes = sorted({float(w) for sel, b in re.findall(r"([^{}]+)\{([^}]*)\}", CSS_MAIN)
-                    for s in sel.split(",")
-                    if re.search(r"(^|[\s>+~])\.ic(\b|$)", s.strip())
-                    for w in re.findall(r"(?<![\w-])width:(\d+(?:\.\d+)?)px", b)})
-    if not sizes:
-        ERR.append("no .ic host sizes found (blind)")
-    elif ic_sw and ic_sw * min(sizes) / 24.0 < DEV_STROKE_FLOOR:
-        ERR.append("icon stroke %.2f px device at %gpx, floor %.2f"
-                   % (ic_sw * min(sizes) / 24.0, min(sizes), DEV_STROKE_FLOOR))
+        return None
+    p = [x for x in re.split(r"[ ,/]+", m.group(1).strip()) if x]
+    try:
+        rgb = tuple(int(float(p[i])) for i in (0, 1, 2))
+    except (ValueError, IndexError):
+        return None
+    return rgb, (float(p[3]) if len(p) > 3 else 1.0)
 
-syms = IG.load_symbols(html)
-if len(syms) < 20:
-    ERR.append("icon geometry scan blind")
-masks, geo = {}, {}
-for sid, s in sorted(syms.items()):
-    span = max(s["box"])
-    els = s["els"]
-    els2 = [(t, dict(a)) for t, a in els]
-    for t, a in els2:
-        a.setdefault("fill", "none")
-    mixed = [t for t, a in els2
-             if a.get("fill", "none") not in ("none", "") and a.get("stroke") != "none"]
-    if mixed:
-        ERR.append(f"{sid}: element {mixed} is both filled and stroked (base .ic paints an outline over it)")
-    g = IG.glyph_metrics(els2, span, ic_sw or 2.0)
-    geo[sid] = g
-    stroked_any = any(a.get("stroke") != "none" for t, a in els2)
-    if g["minlen"] < MIN_SUBLEN:
-        ERR.append(f"{sid}: stroke shorter than {MIN_SUBLEN} user units ({g['minlen']})")
-    small = [c for c in g["c16"] if c < MIN_COMP16]
-    if small:
-        ERR.append(f"{sid}: fragment(s) of {small} px at 16px")
-    if g["gaps"]:
-        ERR.append(f"{sid}: two stroke ends left {g['gaps']} apart — one line drawn as two")
-    if stroked_any:
-        if not (INK_LO <= g["ink20"] <= INK_HI):
-            ERR.append(f"{sid}: ink weight {g['ink20']} outside {INK_LO}..{INK_HI} at 20px")
-        if g["alpha16"] < ALPHA_FLOOR:
-            ERR.append(f"{sid}: stroke alpha {g['alpha16']} below {ALPHA_FLOOR} at 16px (hairline)")
-    masks[sid] = IG.crop_norm([[1 if v >= 0.5 else 0 for v in row]
-                               for row in IG.raster_float(els2, 40, span, ic_sw or 2.0)[0]], n=32)
 
-ids = sorted(masks)
-twins = []
-for i, a in enumerate(ids):
-    for b in ids[i + 1:]:
-        v = IG.best_iou(masks[a], masks[b])
-        if v > IOU_CAP and frozenset((a, b)) not in TWIN_OK:
-            twins.append((round(v, 3), a, b))
-for v, a, b in sorted(twins, reverse=True):
-    ERR.append(f"icons {a}/{b} are the same silhouette (IoU {v} > {IOU_CAP})")
+def _over(color, base):
+    """Полупрозрачный цвет — смешивание с подложкой, а не «дырка»."""
+    if not color or not base:
+        return None
+    (r, g, b), a = color
+    base = base[0] if isinstance(base[0], tuple) else base
+    if a >= 1:
+        return (r, g, b)
+    return tuple(round(a * c + (1 - a) * d) for c, d in zip((r, g, b), base))
 
-# ---- Темы: переключатель, слой второй темы, контраст обеих палитр ----
-TCSS = ROOT / "css" / "themes.css"
-THEME_KEY = "fd.theme.v1"
-if not TCSS.exists():
-    ERR.append("нет css/themes.css: второй теме негде жить")
+
+def _toks(body):
+    return {k: " ".join(v.split()) for k, v in re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", body)}
+
+
+def _tok(name, tree, root_tree, depth=0):
+    v = tree.get(name, root_tree.get(name))
+    m = re.fullmatch(r"var\(\s*(--[a-z0-9-]+)\s*\)", v or "")
+    if m and depth < 6:
+        return _tok(m.group(1), tree, root_tree, depth + 1)
+    return v
+
+
+TEXT_PAIRS = [
+    ("основная кнопка", "--accent-ink", "--accent"),
+    ("бренд-кнопка", "--brand-ink", "--brand"),
+    ("золотая кнопка", "--gold-ink", "--gold"),
+    ("текст на карточке", "--ink", "--surface"),
+    ("текст на странице", "--ink", "--bg"),
+    ("вторичный текст", "--ink-muted", "--surface"),
+    ("бейдж «в сезоне»", "--badge-ink", "--fresh"),
+    ("надзаголовок", "--eyebrow", "--bg"),
+    ("шапка", "--header-ink", "--header-bg"),
+    ("шапка вторично", "--header-muted", "--header-bg"),
+    ("герой вторично", "--hero-muted", "--hero-bg-2"),
+    ("грифельная доска", "--chalk-ink", "--chalk-bg-2"),
+    ("мел на доске", "--chalk-accent", "--chalk-bg-2"),
+]
+root_toks = _toks(palettes.get("root", ""))
+for name, body in sorted(palettes.items()):
+    if name == "root":
+        continue
+    tree = dict(root_toks)
+    tree.update(_toks(body))
+    base = _color(_tok("--bg", tree, root_toks))
+    for what, fg, bg in TEXT_PAIRS:
+        b0 = _over(_color(_tok(bg, tree, root_toks)), base)
+        f0 = _over(_color(_tok(fg, tree, root_toks)), b0)
+        if not f0 or not b0:
+            ERR.append(f"[{name}] «{what}»: не разобрались цвета {fg} на {bg}")
+        elif _ratio(f0, b0) < 4.5:
+            ERR.append(f"[{name}] «{what}» {fg} на {bg} = {_ratio(f0, b0):.2f} — ниже 4.5 по WCAG")
+
+# Кольцо фокуса — не текст, но WCAG 1.4.11 требует у индикатора состояния те же 3:1 к
+# соседу. Обводка и ореол — пара: на пергаменте работает тёмная обводка, на грифельной
+# доске её место занимает светлый ореол. Претензия, только если оба слоя бледнее 3:1.
+RING_SURFACES = ("--bg", "--bg-alt", "--surface", "--header-bg", "--hero-bg-2", "--chalk-bg-2")
+for name, body in sorted(palettes.items()):
+    if name == "root":
+        continue
+    tree = dict(root_toks)
+    tree.update(_toks(body))
+    base = _color(_tok("--bg", tree, root_toks))
+    layers = [_over(_color(_tok(t, tree, root_toks)), base) for t in ("--focus-ring", "--focus-halo")]
+    if not all(layers):
+        ERR.append(f"[{name}] в палитре нет пары --focus-ring/--focus-halo")
+        continue
+    for surf in RING_SURFACES:
+        b0 = _over(_color(_tok(surf, tree, root_toks)), base)
+        if not b0:
+            ERR.append(f"[{name}] «кольцо фокуса»: не разобрался фон {surf}")
+        elif max(_ratio(l, b0) for l in layers) < 3:
+            ERR.append(f"[{name}] кольцо фокуса на {surf}: оба слоя бледнее {max(_ratio(l, b0) for l in layers):.2f}:1 — WCAG 1.4.11")
+
+# Кольцо фокуса ищем по всем правилам с :focus-visible: первое попавшееся
+# «:focus-visible { border-bottom-color }» не доказывает, что фокус видно.
+rings = [body for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css) if ":focus-visible" in sel]
+ring_ok = any(re.search(r"(?<![-\w])outline\s*:\s*(?!none\b|0\b)\S", b) for b in rings)
+if not ring_ok:
+    ERR.append("css: нет правила :focus-visible с outline — клавиатурный фокус не видно")
+if re.search(r"outline\s*:\s*(?:none|0)\b", css) and not ring_ok:
+    ERR.append("css снимает outline, не заменив его кольцом")
+for killer in ("-webkit-tap-highlight-color: transparent", "-webkit-tap-highlight-color:transparent"):
+    if killer in css:
+        NOTES.append("tap-highlight выключен — палец не подтверждает нажатие цветом")
+rm = media_block(css, "(prefers-reduced-motion: reduce)")
+if rm is None:
+    ERR.append("css: нет @media (prefers-reduced-motion: reduce)")
+elif not re.search(r"animation|transition", rm):
+    ERR.append("@media (prefers-reduced-motion: reduce) ничего не гасит")
+# Плавный перелёт по якорям — анимация из взаимодействия (WCAG 2.3.3): флаг reduce обязан
+# выключить и её, иначе клик по меню у чувствительного человека всё равно «летит».
+elif "scroll-behavior: auto" not in rm.replace("  ", " ").replace(":auto", ": auto"):
+    ERR.append("в @media (prefers-reduced-motion: reduce) прокрутка по якорям остаётся плавной")
+if "matchMedia('(prefers-reduced-motion: reduce)')" not in js and 'matchMedia("(prefers-reduced-motion: reduce)")' not in js:
+    ERR.append("JS не смотрит на prefers-reduced-motion: 3D-наклон и перелёты крутятся всегда")
+coarse = media_block(css, "(pointer: coarse)")
+if coarse is None:
+    ERR.append("css: нет @media (pointer: coarse) — тап-цели на телефоне никто не гарантирует")
 else:
-    tcss = TCSS.read_text(encoding="utf-8")
-    mm = re.search(r"\[data-theme=market\]\s*\{([^}]*)\}", tcss)
-    if not mm:
-        ERR.append("тема market не объявлена блоком [data-theme=market]{…}")
-        MVARS = {}
-    else:
-        blk = mm.group(1)
-        MVARS = dict(re.findall(r"(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{6})\b", blk))
-        missed = sorted(set(VARS) - set(MVARS))
-        if missed:
-            ERR.append("тема market не переопределяет цвета базовой палитры: " + repr(missed[:8]))
-        raw = dict(re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", blk))
-        sloppy = sorted(t for t in set(VARS) & set(raw) if not re.fullmatch(r"#[0-9a-fA-F]{6}", raw[t].strip()))
-        if sloppy:
-            ERR.append("в теме market токен(ы) не 6-ричный hex: " + repr(sloppy[:8]))
-        # Мёртвые селекторы слоя: класс обязан жить в разметке или в базовом CSS.
-        src_all = html + CSS_MAIN + (ROOT / "js" / "main.js").read_text(encoding="utf-8")
-        dead = sorted({c for sel in re.findall(r"(\[data-theme=market\][^{}]*)\{", tcss)
-                       for c in re.findall(r"\.([A-Za-z][\w-]*)", sel)
-                       if not re.search(r"[\"'\s.:-]" + re.escape(c) + r"\b", src_all)})
-        if dead:
-            ERR.append("тема market нацелена на классы, которых нет в разметке: " + repr(dead[:8]))
+    for mnum in re.findall(r"min-height:\s*(\d+)px", coarse):
+        if int(mnum) < 24:
+            ERR.append(f"в @media (pointer: coarse) min-height {mnum}px — меньше WCAG 2.5.8")
+    if "44" not in coarse:
+        ERR.append("в @media (pointer: coarse) нет планки 44px для пальцев")
+if "@media print" not in css:
+    ERR.append("css: нет @media print — список покупок нельзя вменяемо распечатать")
 
-    # Кольцо фокуса на тёмной доске бара: базовый --ring #7a2410 даёт на ней 1.7:1 (замер
-    # fs_focus3), поэтому светлое кольцо обязаны получать предметы бара. Мобильная .nav —
-    # бумажная панель, на ней верен базовый --ring, и ловить её в этом правиле нельзя.
-    bar_ring = " ".join(re.findall(r"([^{}]*:focus-visible)\{outline-color:var\(--ring-dark\)\}", tcss))
-    lost_bar = [s for s in (".site-head .logo", ".site-head .cart-btn", ".site-head .burger", ".site-head .head-call")
-                if "[data-theme=market] " + s not in bar_ring]
-    if lost_bar:
-        ERR.append("тема market: предметы бара без светлого фокус-кольца: " + repr(lost_bar))
-    # Ссылки меню светлеют кольцом только в баре (>=769px). Ниже — бумажная панель, и там
-    # кремовое кольцо на кремовом фоне исчезает, поэтому правило обязано жить под медиа-страхом.
-    flat = re.sub(r"\s+", "", tcss)
-    if "@media(min-width:769px){[data-theme=market].nava:focus-visible{outline-color:var(--ring-dark)}}" not in flat:
-        ERR.append("тема market: кольцо ссылок .nav обязано светлеть только в баре (media min-width:769px)")
-    if flat.count("[data-theme=market].nava:focus-visible{outline-color:var(--ring-dark)}") > 1:
-        ERR.append("тема market: второе светлое кольцо для .nav — на бумажной панели оно невидимо")
+# Список «спрятать в печати» живёт отдельно от разметки: селектор, который ничего не
+# находит, молча возвращает на лист кнопку, которую все считали убранной.
+_print_blk = media_block(css, "print")
+if _print_blk:
+    _corpus = html + "\n" + app_js + "\n" + head_js + "\n" + data_js
+    _dead = []
+    for _sel in re.findall(r"([^{}]+)\{[^{}]*display:\s*none\s*!important", re.sub(r"/\*[\s\S]*?\*/", " ", _print_blk)):
+        for _tok in _sel.split(","):
+            _parts = _tok.strip().split()
+            _tok = _parts[-1] if _parts else ""
+            if re.fullmatch(r"[.#][A-Za-z][\w-]*", _tok) and _tok[1:] not in _corpus:
+                _dead.append(_tok)
+    if _dead:
+        ERR.append("в @media print прячут несуществующее: " + ", ".join(sorted(set(_dead))))
 
-    # Контракт второй палитры — те же поверхности, что и в базовой таблице.
-    # Бар шапки в market — доска rgba(36,23,8,.86); по замеру пикселей светимость
-    # полосы даёт #2a1b0d, а не плоский --fig, поэтому считаем от замера.
-    BAR_MKT = "#2a1b0d"
-    PAIRS_MARKET = [
-        ("header brand on the board", "--parch", BAR_MKT, [], 3.0),
-        ("header nav on the board", "--parch", BAR_MKT, [], 4.5),
-        ("header cart icon on the board", "--quince-hi", BAR_MKT, [], 4.5),
-        ("header burger on the board", "--quince-hi", BAR_MKT, [], 3.0),
-        ("header CTA label on the board", "--parch", BAR_MKT, [], 4.5),
-        ("status label on its paper tag", "--fig", "--surface", [], 4.5),
-        ("status dot open", "--ok", "--surface", [], 3.0),
-        ("status dot shut", "--danger", "--surface", [], 3.0),
-        ("badge caption", "#ffffff", "--persimmon-d", [], 4.5),
-        ("promo heading", "--quince-hi", "--leaf-d", [("--persimmon", 0.34)], 3.0),
-        ("promo body", "#e7dcc9", "--leaf-d", [("--persimmon", 0.34)], 4.5),
-        ("active chip ink", "--chip-ink", "--fig2", [], 4.5),
-        ("muted body on kraft", "--muted", "--parch", [], 4.5),
-        ("accent link on kraft", "--persimmon-d", "--parch", [], 4.5),
-        # Тот же поправочный замер, но на крафте: текстура доски темнее токена.
-        ("accent label on grained kraft", "--persimmon-d", "#c0a682", [], 4.5),
-        ("badge caption under sheen", "#ffffff", "--persimmon-d", [("#ffffff", SHEEN)], 4.5),
-        ("primary button label", "#1c1004", "--persimmon", [], 4.5),
-        ("hero text on wood", "#f4e8d6", "--fig2", [], 4.5),
-        ("footer link", "#eadfce", "--fig", [], 4.5),
-        ("estimate value", "--quince-l", "--fig2", [], 3.0),
-        ("switcher caption", "#dccbb6", "--fig2", [], 4.5),
-    ]
-    if MVARS:
-        _saved = dict(VARS)
-        VARS.update(MVARS)
-        for label, fg, base, over, need in PAIRS_MARKET:
-            rt = ratio(col(fg), fold(base, over))
-            if rt < need:
-                ERR.append(f"contrast market {label}: {rt:.2f} < {need}")
-        VARS.clear(); VARS.update(_saved)
+# Меню в шапке держится на двух правилах: навигацию показывают, бургер прячут. Пороги
+# обязаны совпадать: если разойдутся, на ширине между ними не останется ни одного способа
+# открыть разделы (бургер уже спрятан, а ссылок ещё нет).
+def _header_bp(sel, action):
+    m = re.search(r"@media \(min-width:\s*(\d+)px\)\s*\{\s*" + re.escape(sel) + r"\s*\{\s*" + action, css)
+    return None if m is None else int(m.group(1))
 
-    # Правила шапки market: бар — тёмная доска, поэтому каждый предмет на баре
-    # обязан быть перекрашен явно. Иначе шапка сливается с доской (контраст 1.0),
-    # и по одним токенам этого не увидеть.
-    HEAD_MKT = [
-        (r"\[data-theme=market\] \.site-head \.logo-text\{([^}]*)\}", "var(--parch)", "надпись логотипа"),
-        (r"\[data-theme=market\] \.head-live\{([^}]*)\}", "var(--surface)", "этикетка часов"),
-        (r"\[data-theme=market\] \.cart-btn\{([^}]*)\}", "var(--quince-hi)", "обводка корзины"),
-        (r"\[data-theme=market\] \.burger span\{([^}]*)\}", "var(--quince-hi)", "полоски бургера"),
-    ]
-    for pat, needle, label in HEAD_MKT:
-        hm = re.search(pat, tcss)
-        if not hm:
-            ERR.append(f"шапка market: правило «{label}» пропало — на тёмной доске предмет станет невидим")
-        elif needle not in hm.group(1):
-            ERR.append(f"шапка market: «{label}» больше не ссылается на {needle}")
+_nav_bp = _header_bp(".main-nav", r"display:\s*flex")
+_burger_bp = _header_bp(".burger-btn", r"display:\s*none")
+if _nav_bp is None:
+    ERR.append("css: .main-nav не включается ни одним @media — меню раздела недоступно даже на большом экране")
+elif _burger_bp is None:
+    ERR.append("css: .burger-btn нигде не прячется — на десктопе под шапкой второе меню")
+elif _nav_bp != _burger_bp:
+    ERR.append(f"пороги шапки разошлись: ссылки показывают с {_nav_bp}px, бургер прячут с {_burger_bp}px")
 
-    # Навигация прячется в светлую панель на брейкпоинте базовой темы. Если защита
-    # стоит шире, на планшете ссылки останутся тёмными на тёмном баре.
-    def _block(css, brace_pos):
-        depth = 0
-        for k in range(brace_pos, len(css)):
-            if css[k] == "{":
-                depth += 1
-            elif css[k] == "}":
-                depth -= 1
-                if depth == 0:
-                    return css[brace_pos:k + 1]
-        return ""
+def class_tokens(tpl):
+    """Классы из шаблона: из ${peak ? 'is-peak' : ''} берём строковые литералы."""
+    flat = re.sub(r"\$\{([^}]*)\}", lambda m: " " + " ".join(re.findall(r"""['"]([\w-]+)['"]""", m.group(1))) + " ", tpl)
+    return [x for x in flat.split() if re.fullmatch(r"[\w-]+", x)]
 
-    nav_bp = next((int(m.group(1)) for m in re.finditer(r"@media\(max-width:(\d+)px\)\{", CSS_MAIN)
-                   if ".nav{position:fixed" in _block(CSS_MAIN, m.end() - 1)), None)
-    if nav_bp is None:
-        ERR.append("не нашли, на какой ширине .nav уходит в панель — гейт ссылок market слепой")
-    elif not re.search(r"@media\(min-width:%dpx\)\{\s*\[data-theme=market\] \.nav a\{[^}]*var\(--parch\)" % (nav_bp + 1), tcss):
-        ERR.append(f"ссылки market должны быть защищены @media(min-width:{nav_bp + 1}px): ниже "
-                   f"{nav_bp}px навигация живёт в светлой панели и просит базовые чернила")
 
-    # Контракт переключателя.
-    if 'data-theme="parchment"' not in html:
-        ERR.append("на <html> нет дефолтного data-theme=parchment")
-    opts = re.findall(r'data-theme-set="([^"]+)"', html)
-    if sorted(set(opts)) != ["market", "parchment"]:
-        ERR.append(f"переключатель тем предлагает {sorted(set(opts))}, ждали market+parchment")
-    if len(opts) != 2:
-        ERR.append(f"кнопок смены темы {len(opts)}, а вариантов два")
-    if html.count('aria-pressed=') < 2 or 'ts-note' not in html:
-        ERR.append("переключатель тем без aria-pressed или без подписи для заказчика")
-    note = re.search(r'class="ts-note">([^<]{6,})<', html)
-    if not note:
-        ERR.append("подпись темы слишком короткая или пропала")
-    elif not re.search(r"(согласу|выбер|остав)", note.group(1), re.I):
-        ERR.append("подпись у переключателя не обещает заказчику выбор темы: " + note.group(1)[:60])
-    tjs = ROOT / "js" / "theme.js"
-    if not tjs.exists():
-        ERR.append("нет js/theme.js: тема встанет только после первой отрисовки")
-    else:
-        tj = tjs.read_text(encoding="utf-8")
-        if THEME_KEY not in tj:
-            ERR.append("js/theme.js не читает " + THEME_KEY)
-        tag = re.search(r'<script[^>]*src="js/theme\.js"[^>]*>', html)
-        if not tag:
-            ERR.append("js/theme.js не подключён")
-        elif re.search(r"defer|async|type=.module", tag.group(0)):
-            ERR.append("js/theme.js отложен — будет вспышка базовой темы")
-        elif tag.start() > html.find('<link rel="stylesheet"'):
-            ERR.append("js/theme.js идёт после стилей — атрибут темы встанет поздно")
-    mj = (ROOT / "js" / "main.js").read_text(encoding="utf-8")
-    if THEME_KEY not in mj:
-        ERR.append("main.js не сохраняет выбор темы в " + THEME_KEY)
-    if not re.search(r"writeLS\(\s*THEME_KEY\s*,", mj):
-        ERR.append("main.js не сохраняет выбор темы: нет writeLS(THEME_KEY, …)")
-    # $$ и writeLS живут внутри IIFE: обработчик снаружи кинет ReferenceError на клике.
-    iife_end = mj.find("})();if('serviceWorker'")
-    bind = mj.find("$$('[data-theme-set]').forEach(function(b){b.addEventListener")
-    if iife_end < 0 or bind < 0 or bind > iife_end:
-        ERR.append("main.js вешает кнопки темы вне IIFE — $$ и writeLS там не видны")
-    if "data-theme-set" not in mj:
-        ERR.append("main.js не вешает обработчик на кнопки темы")
-    if not re.search(r"@media\s+print\s*\{[^}]*\.theme-switch\s*\{[^}]*display\s*:\s*none", tcss):
-        ERR.append("переключатель темы попадёт на печать")
+used_classes = set(doc.classes) | set(d404.classes)
+for src_text in (app_js, head_js, data_js):
+    for raw in re.findall(r"""class(?:Name)?\s*=\s*["'`]([^"'`]*)["'`]""", src_text):
+        used_classes |= {x for x in class_tokens(raw) if not x.startswith(("is-", "has-"))}
+    used_classes |= set(re.findall(r"""classList\.(?:add|remove|toggle)\(\s*['"]([\w-]+)""", src_text))
+# только селекторы: иначе «.html» и «.py» из комментариев и путей считаются классами
+css_classes = set()
+bare_css = re.sub(r"/\*[\s\S]*?\*/", "", css)
+for sel in re.findall(r"(?:^|[;}{])\s*([^{};@]*?)\s*\{", bare_css):
+    css_classes |= set(re.findall(r"\.([A-Za-z][\w-]*)", sel))
+undefined = sorted(c for c in used_classes - css_classes if not c.startswith(("is-", "has-")) and len(c) > 2)
+if undefined:
+    ERR.append("класс в разметке/JS без единого правила в css: " + ", ".join(undefined[:10]))
+# is-*/has-* — состояния, которые навешиваются условно и именами из переменных: статикой не свести
+unused = sorted(c for c in css_classes - used_classes if not c.startswith(("is-", "has-")))
+if len(unused) > 6:
+    NOTES.append(f"правил css не востребовано: {len(unused)} шт.: " + ", ".join(unused))
+elif unused:
+    NOTES.append("правил css не востребовано: " + ", ".join(unused))
 
-for n in NOTES: print("NOTE:", n)
+for f in ("robots.txt", "sitemap.xml"):
+    txt = (ROOT / f).read_text(encoding="utf-8")
+    for u in re.findall(r"https?://[^\s<>\"]+", txt):
+        if not u.startswith(SITE_URL) and "sitemaps.org/schemas" not in u:
+            ERR.append(f"{f}: чужой адрес {u}")
+    if SITE_URL not in txt:
+        ERR.append(f"{f}: нет canonical {SITE_URL}")
+sm = (ROOT / "sitemap.xml").read_text(encoding="utf-8")
+if re.findall(r"<loc>([^<]+)</loc>", sm) != [SITE_URL]:
+    ERR.append("sitemap: <loc> не равен canonical")
+if "index.html" in sm:
+    ERR.append("sitemap: index.html должен быть каноничен через /")
+robots = (ROOT / "robots.txt").read_text(encoding="utf-8")
+if "Sitemap:" not in robots:
+    ERR.append("robots.txt: нет строки Sitemap — сканер не найдёт карту")
+
+if not ERR:
+    print(f"гейты: {len(doc.ids)} id, {len(PRODUCTS)} позиций, {len(imgs)} картинок, "
+          f"{len(doc.symbols)} иконок, {len(css_classes)} классов, {len(declared_themes)} палитр")
+for note in NOTES:
+    print("NOTE:", note)
 if ERR:
     print("FAIL:")
-    for e in ERR: print(" -", e)
+    for e in ERR:
+        print(" -", e)
     sys.exit(1)
 print("ALL CHECKS PASSED")

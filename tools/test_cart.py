@@ -1,64 +1,195 @@
 #!/usr/bin/env python3
-"""Юнит-тесты корзины в реальном JS-движке (quickjs).
-Код корзины вырезается из js/main.js как есть — тестируется тот код, который уезжает на сайт.
+"""Юнит-тесты пакета в реальном JS-движке (quickjs).
+
+Тело IIFE из js/app.js вырезается как есть и исполняется с заглушками DOM:
+тестируется ровно тот код, который уезжает на сайт, а не его пересказ на Python.
+Ганяется та логика, которую браузер сам не проверяет: количества, вес, «пакет по
+ссылке» из чужого URL, текст заявки и то, что денег в нём нет.
+
 Запуск: python tools/test_cart.py"""
-import re, sys
+import json, re
+import sys
 from pathlib import Path
+
 import quickjs
 
 ROOT = Path(__file__).resolve().parent.parent
-main = (ROOT / "js" / "main.js").read_text(encoding="utf-8")
-m = re.search(r"var CART_KEY=[\s\S]*?\}\)\(\);", main)
+data = (ROOT / "js" / "data.js").read_text(encoding="utf-8")
+app = (ROOT / "js" / "app.js").read_text(encoding="utf-8")
+
+# тело IIFE: шапка-комментарий и переносы строки не важны, важна форма «(() => { … })();»
+m = re.search(r"\(\s*\(\s*\)\s*=>\s*\{(.*)\}\s*\)\s*\(\s*\)\s*;?\s*\Z", app, re.S)
 if not m:
-    print("FAIL: cart IIFE not found in js/main.js"); sys.exit(1)
-cart_src = m.group(0)
+    print("FAIL: js/app.js is not a single IIFE — update the extractor"); sys.exit(1)
+body = m.group(1).strip()
+
+STUBS = r"""
+var mem = {};
+var localStorage = {
+  getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+  setItem: function (k, v) { mem[k] = String(v); },
+  removeItem: function (k) { delete mem[k]; }
+};
+var nodes = {}, created = 0, opened = [];
+function el(id) {
+  if (!nodes[id]) {
+    nodes[id] = {
+      id: id, value: '', textContent: '', innerHTML: '', open: false, href: '', className: '', attrs: {},
+      style: { setProperty: function () {}, removeProperty: function () {} },
+      dataset: {}, children: [],
+      classList: { toggle: function () {}, add: function () {}, remove: function () {}, contains: function () { return false; } },
+      appendChild: function (c) { this.children.push(c); return c; },
+      querySelector: function () { return el(id + ':q'); },
+      querySelectorAll: function () { return []; },
+      addEventListener: function () {}, removeEventListener: function () {},
+      setAttribute: function (k, v) { this.attrs[k] = v; }, getAttribute: function (k) { return this.attrs[k] || null; },
+      getBoundingClientRect: function () { return { top: 0, left: 0, width: 10, height: 10, right: 10, bottom: 10 }; },
+      scrollIntoView: function () {}, focus: function () {}, select: function () {}, remove: function () {},
+      closest: function () { return null; }, matches: function () { return false; }, click: function () {}
+    };
+  }
+  return nodes[id];
+}
+var document = {
+  readyState: 'loading',
+  documentElement: { dataset: { theme: 'market', cards: '3d' }, style: { setProperty: function () {} },
+                     setAttribute: function () {}, getAttribute: function () { return null; },
+                     classList: { add: function () {}, remove: function () {}, toggle: function () {} } },
+  body: { appendChild: function (c) { return c; }, classList: { add: function () {}, remove: function () {} } },
+  getElementById: function (id) { return el(id); },
+  querySelector: function (s) { return el('sel:' + s); },
+  querySelectorAll: function () { return []; },
+  createElement: function (t) { return el('new:' + t + ':' + (created++)); },
+  addEventListener: function () {}, removeEventListener: function () {}
+};
+var window = {
+  open: function (u) { opened.push(u); return null; },
+  matchMedia: function () { return { matches: false, addEventListener: function () {}, addListener: function () {} }; },
+  addEventListener: function () {}, removeEventListener: function () {},
+  requestAnimationFrame: function () { return 0; }, scrollTo: function () {}
+};
+var location = { hash: '', origin: 'https://site.test', pathname: '/fruktovy/' };
+var navigator = { clipboard: { writeText: function () { return { then: function () {}, catch: function () {} }; } } };
+function setTimeout() { return 0; }
+function clearTimeout() {}
+function setInterval() { return 0; }
+function clearInterval() {}
+"""
+
+TESTS = r"""
+var n = 0, fails = [];
+function ok(name, cond) { n++; if (!cond) fails.push(name); }
+
+/* --- каталог: на этих полях держатся и вес, и текст заявки --- */
+ok('каталог 25 позиций', PRODUCTS.length === 25);
+ok('ids уникальны', new Set(PRODUCTS.map(function (p) { return p.id; })).size === PRODUCTS.length);
+ok('цен в данных нет', PRODUCTS.every(function (p) { return p.price === null && p.oldPrice === null; }));
+ok('вес задан у всех', PRODUCTS.every(function (p) { return typeof p.weightKg === 'number' && p.weightKg > 0; }));
+ok('единицы из заявленных', PRODUCTS.every(function (p) { return ['кг', 'шт', '100 г'].indexOf(p.unit) !== -1; }));
+ok('сезон в пределах 1..12', PRODUCTS.every(function (p) {
+  return p.season.length > 0 && p.season.every(function (mo) { return mo >= 1 && mo <= 12; });
+}));
+ok('«часто берут вместе» ссылается на каталог', PRODUCTS.every(function (p) {
+  return (p.together || []).every(function (id) { return PRODUCTS.some(function (x) { return x.id === id; }); });
+}));
+ok('хиты дня существуют', DAILY_HITS.every(function (id) { return PRODUCTS.some(function (p) { return p.id === id; }); }));
+
+/* --- пустой пакет --- */
+state.cart = {}; state.promoCode = null; state.wishes = new Set(); state.delivery = 'pickup';
+var e0 = cartStats();
+ok('пусто: 0 позиций', e0.count === 0 && e0.entries.length === 0);
+ok('пусто: 0 кг', e0.kg === 0);
+
+/* --- количества и вес --- */
+setCartQty('apple', 1);
+ok('одна позиция', cartStats().count === 1);
+ok('вес = weightKg * qty', Math.abs(cartStats().kg - byId('apple').weightKg) < 1e-9);
+setCartQty('apple', 3);
+ok('перезапись количества', state.cart.apple === 3 && cartStats().count === 1);
+setCartQty('banana', 2);
+ok('вторая позиция', cartStats().count === 2);
+ok('суммарный вес', Math.abs(cartStats().kg - (byId('apple').weightKg * 3 + byId('banana').weightKg * 2)) < 1e-9);
+setCartQty('walnut', 99);
+ok('потолок 30', state.cart.walnut === 30);
+setCartQty('walnut', -5);
+ok('ноль убирает позицию', !('walnut' in state.cart) && cartStats().count === 2);
+setCartQty('apple', 0);
+ok('нулевая позиция не считается', cartStats().count === 1 && state.cart.apple === undefined);
+
+/* --- мусор из старого localStorage: ни в пакет, ни в заявку --- */
+state.cart = { banana: 2, 'duh-iz-proshlogo': 4, papaya: -1 };
+var gs = cartStats();
+ok('призраки отсеяны', gs.count === 1 && gs.entries.length === 1 && gs.entries[0][0] === 'banana');
+ok('вес без призраков', Math.abs(gs.kg - byId('banana').weightKg * 2) < 1e-9);
+
+/* --- пакет по ссылке из чужого URL --- */
+state.cart = {}; location.hash = '#cart=apple:2,duh:9,banana:1,tomato:99';
+hydrateCartFromHash();
+ok('ссылка дочитала свои', state.cart.apple === 2 && state.cart.banana === 1);
+ok('ссылка игнорит чужие и недоступные', !('duh' in state.cart) && !('tomato' in state.cart));
+ok('пакет сохранён в localStorage', JSON.parse(mem[KEYS.cart]).apple === 2);
+
+/* --- текст заявки: самовывоз --- */
+state.cart = { apple: 2, spices: 3 }; state.promoCode = null;
+state.wishes = new Set(['Поспелее на сегодня']); state.delivery = 'pickup';
+el('cartNote').value = '  ';
+var t1 = buildOrderText('З-1234', { name: 'Аня', phone: '+7 999 000-00-00' });
+ok('шапка с номером заявки', t1.indexOf('Заявка З-1234 с сайта') === 0);
+ok('строки с единицами', t1.indexOf('1. Яблоки — 2 кг') !== -1 && t1.indexOf('2. Специи на развес — 3 100 г') !== -1);
+ok('позиции посчитаны', t1.indexOf('Позиций: 2, примерно ') !== -1);
+ok('вес по-русски, через запятую', /примерно ~\d+,\d кг/.test(t1));
+ok('самовывоз адресован', t1.indexOf('Заберу сам: Сытнинская, 12') !== -1);
+ok('просит цену дня', t1.indexOf('цены сегодняшнего завоза') !== -1);
+ok('контакт для ответа', t1.indexOf('Отвечать на: +7 999 000-00-00 (Аня)') !== -1);
+ok('пожелание передано', t1.indexOf('Пожелания: Поспелее на сегодня') !== -1);
+ok('пустой комментарий не печатается', t1.indexOf('Комментарий') === -1);
+ok('без промокода строки нет', t1.indexOf('Промокод') === -1);
+
+/* --- текст заявки: курьер + промокод + комментарий --- */
+state.delivery = 'courier'; state.promoCode = 'РЫНОК10';
+el('cartNote').value = 'Помойте зелень заранее';
+var t2 = buildOrderText(null, { name: 'Аня', phone: 'wa:anya', address: 'Большой пр. П.С., 45', slot: 'Сегодня 14:00–17:00' });
+ok('курьерский адрес и слот', t2.indexOf('Курьером: Большой пр. П.С., 45 · время: Сегодня 14:00–17:00') !== -1);
+ok('промокод передан текстом', t2.indexOf('Промокод: РЫНОК10') !== -1);
+ok('комментарий передан', t2.indexOf('Комментарий: Помойте зелень заранее') !== -1);
+ok('без номера — приветствие', t2.indexOf('Здравствуйте! Заявка с сайта') === 0);
+
+/* --- деньги: их в заявке нет ни в каком виде --- */
+var allText = [t1, t2, buildOrderText()].join('\n');
+ok('в тексте заявки нет рублей', allText.indexOf('₽') === -1);
+ok('в тексте заявки нет платёжной лексики', !/оплат|карт|СБП|эквайринг|скидка применена/i.test(allText));
+ok('промокод — метка, а не математика', typeof PROMOS['РЫНОК10'].label === 'string' && PROMOS['РЫНОК10'].label.length > 0);
+
+/* --- отправка: открывается wa.me, своего бэкенда у сайта нет --- */
+opened.length = 0;
+sendWhatsAppOrder();
+ok('открыт ровно один wa.me', opened.length === 1 && opened[0].indexOf('https://wa.me/') === 0);
+ok('ссылка URL-закодирована', opened[0].indexOf(' ') === -1 && opened[0].indexOf('%D0') !== -1);
+ok('пустой пакет не отправляется', (function () { state.cart = {}; opened.length = 0; sendWhatsAppOrder(); return opened.length === 0; })());
+
+/* --- тема: применяется только заявленная палитра --- */
+applyTheme('night');
+ok('тема применилась', document.documentElement.dataset.theme === 'night' && mem[KEYS.theme] === 'night');
+applyTheme('vasilok');
+ok('неизвестная тема отклонена', document.documentElement.dataset.theme === 'night');
+ok('палитры объявлены в THEME_LABELS', Object.keys(THEME_LABELS).length >= 2);
+"""
 
 ctx = quickjs.Context()
-ctx.eval((ROOT / "js" / "data.js").read_text(encoding="utf-8"))
-ctx.eval("""
-var mem = {};
-function readLS(k, f){ try { var v = mem[k]; return v ? JSON.parse(v) : f; } catch (e) { return f; } }
-function writeLS(k, v){ mem[k] = JSON.stringify(v); }
-function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-function product(id){ for (var i = 0; i < PRODUCTS.length; i++) if (PRODUCTS[i].id === id) return PRODUCTS[i]; return null; }
-function money(n){ return n + ' ₽'; }
-var dom = { '#pickupWhen': { value: 'сегодня до 18:00' }, '#giftFlag': { checked: true }, '#cartComment': { value: 'поспелее' } };
-function $(s){ return dom[s] || null; }
-""")
-ctx.eval(cart_src)
-n = ctx.eval("""
-var n = 0;
-function ok(name, cond){ n++; if (!cond) throw new Error("FAIL: " + name); }
-ok("empty", cart.count() === 0);
-cart.add("apple", 2); cart.add("banana"); cart.add("apple");
-ok("accumulate", cart.qty("apple") === 3 && cart.count() === 4);
-cart.add("apple", 500); ok("cap 99", cart.qty("apple") === 99);
-cart.add("apple", -500); ok("floor removes", cart.qty("apple") === 0);
-cart.add("apple", 3);
-ok("ghost ignored", cart.add("ghost", 1) === 0 && cart.qty("ghost") === 0);
-var q = cart.remove("apple"); ok("remove returns qty", q === 3);
-cart.restore("apple", q); ok("undo", cart.qty("apple") === 3);
-cart.replace({ apple: 2, ghost: 9, banana: 0 }); ok("replace filters", cart.qty("apple") === 2 && cart.qty("ghost") === 0 && cart.qty("banana") === 0);
-var t = cart.totals(); ok("null prices", t.unknown === 1 && t.sum === 0);
-for (var i = 0; i < PRODUCTS.length; i++) if (PRODUCTS[i].id === "apple") PRODUCTS[i].price = 150;
-var t2 = cart.totals(); ok("known sum", t2.sum === 300 && t2.unknown === 0);
-var msg = cart.message();
-ok("text items", msg.indexOf("Яблоки — 2 кг (300 ₽)") !== -1);
-ok("text when", msg.indexOf("Планирую забрать: сегодня до 18:00.") !== -1);
-ok("text gift", msg.indexOf("Это подарок") !== -1);
-ok("text comment", msg.indexOf("Комментарий: поспелее") !== -1);
-ok("text honest", msg.indexOf("Подтвердите, пожалуйста, наличие и цену дня.") !== -1);
-ok("text pickup", msg.indexOf("Самовывоз: СПб, Сытнинская, 12.") !== -1);
-cart.saveLast(); cart.clear(); ok("clear", cart.count() === 0);
-ok("repeat", cart.repeat() && cart.count() === 2);
-ok("lines shape", cart.lines().every(function (l) { return l.p && l.qty > 0; }));
-ok("bundle valid", BUNDLE.every(function (id) { return PRODUCTS.some(function (p) { return p.id === id; }); }));
-ok("fields", PRODUCTS.every(function (p) { return p.photo && p.unit && p.name && p.season; }));
-n;
-""")
-if ctx.eval(cart_src + ";cart.qty('apple')") != 2:
-    print("FAIL: persist — new cart instance lost stored items"); sys.exit(1)
-n += 1
+src = STUBS + "\n" + data + "\n" + body + "\n" + TESTS
+try:
+    ctx.eval(src)
+except BaseException as e:
+    print(f"FAIL: JS raised: {str(e)[:400]}")
+    sys.exit(1)
+
+n = int(ctx.eval("n"))
+bad = [str(x) for x in json.loads(ctx.eval("JSON.stringify(fails)"))]
+if bad:
+    for f in bad:
+        print("FAIL:", f)
+    print(f"CART TESTS: {n - len(bad)}/{n} PASS")
+    sys.exit(1)
 if n < 20:
     print(f"FAIL: only {n} assertions ran (blind)"); sys.exit(1)
 print(f"CART TESTS: {n}/{n} PASS")
