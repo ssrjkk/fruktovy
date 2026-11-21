@@ -15,7 +15,7 @@ PWA-иконки, каталожный JSON-LD, прекеширующий сп�
 (build → тесты и мутации → --minify-only), чтобы артефакт на Pages собирался
 после того, как гейты доказали, что кусаются, и без второй качки фото.
 
-Зависимости: pip install pillow rcssmin rjsmin quickjs
+Зависимости: pip install pillow rcssmin rjsmin quickjs segno
 """
 import argparse, datetime, io, json, re, ssl, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -29,10 +29,15 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/1
 
 # Палитра market (data-theme="market" — тема по умолчанию) из css/style.css.
 # og.png и иконки рисуются именно в ней: превью ссылается на него человек,
-# открывший вкладку в WhatsApp, а не посетитель другой палитры.
+# открывший вкладку в Telegram, а не посетитель другой палитры.
 CREAM, INK, BRAND, ACCENT, CEDAR = (250, 245, 236), (34, 27, 21), (27, 77, 62), (200, 75, 40), (140, 94, 60)
 
 SITE_URL = "https://ssrjkk.github.io/fruktovy/"
+# QR на витрине и в README рисуется из канонического адреса: Pages-URL не меняется,
+# поэтому код вечный — пересобирать его нужно только вместе со сменой адреса.
+# Одинаковые параметры у tools/build.py и tools/check.py — иначе гейт сверял бы не то.
+QR_ERROR = "m"
+QR_SCALE = 6
 
 # Только те гарнитуры, что реально названы в css/style.css, и только те веса,
 # которые там объявлены: лишний файл — это байты, уезжающие каждому гостю.
@@ -52,7 +57,7 @@ RANGES = {
              "U+2000-206F, U+20AC, U+2122, U+2212, U+FEFF, U+FFFD",
 }
 
-# Размеры сняты с вызовов pexels(...) в js/app.js и со статичных <img> в index.html:
+# Размеры сняты с вызовов photoSrc(...) в js/app.js и со статичных <img> в index.html:
 # плитка каталога, крупные фото подглядывания, миниатюры корзины/избранного, галерея.
 PRODUCT_SIZES = [(640, 480), (900, 675), (240, 180), (200, 200), (140, 140), (120, 120)]
 GALLERY_SIZES = [(640, 480), (1200, 900)]
@@ -62,7 +67,8 @@ OG_HERO = (31665655, 1200, 900)
 # чтобы он не разъезжался с реальным набором файлов.
 SW_CORE = ["./", "./index.html", "./404.html", "./css/style.css", "./assets/fonts.css",
            "./js/app-head.js", "./js/data.js", "./js/app.js", "./assets/logo.svg",
-           "./manifest.webmanifest", "./assets/icon-192.png", "./assets/icon-512.png"]
+           "./manifest.webmanifest", "./assets/icon-192.png", "./assets/icon-512.png",
+           "./assets/qr.svg"]
 
 
 def fetch(url, tries=4, timeout=30):
@@ -222,7 +228,7 @@ def build_og():
     d = ImageDraw.Draw(img); crown(d, 150, 92, 104)
     d.text((92, 140), "Фруктовый дворец", font=font_path(64, serif=True), fill=CREAM)
     d.text((95, 258), "Фрукты · Овощи · Орехи · Сухофрукты · Специи", font=font_path(34), fill=(212, 155, 42))
-    d.text((95, 318), "Соберите пакет на сайте — продавец пришлёт расчёт в WhatsApp",
+    d.text((95, 318), "Соберите пакет на сайте — продавец пришлёт расчёт в Telegram",
            font=font_path(28), fill=CREAM)
     for y, txt, bg in [(430, "СПб, Сытнинская ул., 12 · м. Горьковская", CREAM),
                        (520, "Ежедневно 08:00–21:00 · 4,7 на Яндекс Картах", (212, 155, 42))]:
@@ -245,6 +251,26 @@ def build_icons_pwa():
         d.ellipse([cx + r * 0.15, cy - r * 1.6, cx + r * 0.95, cy - r * 1.15], fill=(121, 194, 103))
         img.save(A / f"icon-{s}.png", optimize=True)
     print("pwa icons ok")
+
+
+def build_qr():
+    """QR-код витрины: берёт адрес из <link rel="canonical">, а не из воздуха у оператора.
+
+    Код печатается вектором и ложится в README и на страницу «Ждём на Петроградке»:
+    навести телефон быстрее, чем диктовать адрес вслух. tools/check.py сравнивает
+    нарисованную матрицу с адресом из canonical — так «QR ведёт не туда» краснеет на сборке.
+    """
+    import segno
+    html = (ROOT / "index.html").read_text(encoding="utf-8")
+    target = re.search(r'rel="canonical" href="([^"]+)"', html)
+    if not target:
+        raise SystemExit("QR: в index.html нет canonical — нечего кодировать")
+    url = target.group(1)
+    if url != SITE_URL:
+        raise SystemExit(f"QR: canonical {url} не равен SITE_URL {SITE_URL}")
+    segno.make(url, error=QR_ERROR).save(
+        A / "qr.svg", kind="svg", scale=QR_SCALE, dark=INK, light=(255, 255, 255), nl=False)
+    print(f"qr.svg ok: {url} -> {(A / 'qr.svg').stat().st_size} Б")
 
 
 def build_sw():
@@ -296,7 +322,7 @@ if __name__ == "__main__":
         for d in (IMG, FONTS):
             d.mkdir(parents=True, exist_ok=True)
         build_fonts(); files = build_photos()
-        build_catalog_ld(); build_og(); build_icons_pwa(); build_sw()
+        build_catalog_ld(); build_og(); build_icons_pwa(); build_qr(); build_sw()
     finalize(minify=args.minify or args.minify_only)
     total = sum(p.stat().st_size for p in A.rglob("*") if p.is_file())
     print(f"DONE. assets: {total // 1024} KB, {len(files)} фото")

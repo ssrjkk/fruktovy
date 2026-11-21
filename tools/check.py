@@ -10,6 +10,7 @@
 Запуск: python tools/check.py [--skip-assets]
 """
 import json
+import math
 import re
 import sys
 from html.parser import HTMLParser
@@ -28,9 +29,10 @@ VOID = {"meta", "link", "img", "br", "hr", "input", "source", "path", "circle", 
 GENERIC_FONTS = {"Georgia", "Times New Roman", "-apple-system", "BlinkMacSystemFont", "Segoe UI",
                  "Roboto", "sans-serif", "serif", "monospace", "system-ui", "Apple Color Emoji"}
 # Хосты, которым разрешено торчать в исходниках. schema.org и w3.org — пространства имён
-# (JSON-LD и SVG), а не запросы наружу; wa.me и tel: — каналы связи магазина;
-# yandex.ru — единственный iframe: виджет рейтинга, он же единственный источник отзывов.
-ALLOWED_HOSTS = {"ssrjkk.github.io", "wa.me", "yandex.ru", "yandex.com", "schema.org", "www.w3.org"}
+# (JSON-LD и SVG), а не запросы наружу; t.me и tel: — каналы связи магазина (единственные:
+# заявка уходит в Telegram-чат лавки); yandex.ru — единственный iframe: виджет рейтинга,
+# он же единственный источник отзывов.
+ALLOWED_HOSTS = {"ssrjkk.github.io", "t.me", "yandex.ru", "yandex.com", "schema.org", "www.w3.org"}
 
 
 class Doc(HTMLParser):
@@ -472,6 +474,8 @@ for code, promo in data["PR"].items():
         ERR.append(f"промокод {code}: нет человеческой расшифровки")
     if re.search(r"примен|итог|сумм", promo.get("label", ""), re.I):
         ERR.append(f"промокод {code}: обещает пересчёт суммы, которого на витрине нет")
+    if re.search(r"\d+\s*%|минус\s*\d|\d+\s*₽", promo.get("label", ""), re.I):
+        ERR.append(f"промокод {code}: в подписи обещана скидка цифрой, а цен на витрине нет")
 
 # ==================================================== 7. ЧЕСТНОСТЬ ТЕКСТА ====
 FORBIDDEN = [
@@ -487,6 +491,9 @@ FORBIDDEN = [
     (r"более \d+ (?:клиентов|покупателей|отзывов)", "выдуманная аудитория"),
     (r"\d+ (?:лет|года) на рынке", "выдуманный стаж"),
     (r"(?:5\.0|4\.9|5 зв)", "рейтинг, которого нет на Яндекс Картах"),
+    (r"(?i:wa\.me|whatsapp)", "чужой мессенджер: у лавки один канал связи — Telegram-чат"),
+    (r"(?i:viber\.com|m\.me|facebook\.com|vk\.com|instagram\.com|max\.ru|discord\.)",
+     "посторонняя соцсеть: ссылки на чаты ведут в Telegram магазина"),
 ]
 for pat, why in FORBIDDEN:
     for src_name, text in (("index.html", html), ("css/style.css", css), ("js", js)):
@@ -500,6 +507,61 @@ if "по запросу" not in app_js:
 for claim in ("доставка за 30", "доставим за 30", "круглосуточн"):
     if claim in plain.lower():
         NOTES.append(f"в тексте встретилось «{claim}» — сверить, что это правда")
+
+# ============================================ 7a. КОНТАКТЫ И ЗОНА ДОСТАВКИ ====
+# Витрина обещает один телефон, один чат и одну зону доставки. Всё это живёт в js/data.js:
+# до этого номер и мессенджер были вписаны руками в шести местах, и правка одного из них
+# молча уводила заявку в чужой чат, а страница продолжала показывать «наш» номер.
+shop = re.search(r"const SHOP\s*=\s*\{([^}]*)\}", data_js)
+shop_fields = dict(re.findall(r"(\w+)\s*:\s*'([^']*)'", shop.group(1))) if shop else {}
+if not shop:
+    ERR.append("data.js: нет таблицы SHOP — сверять контакты не с чем")
+    shop_fields = {}
+SHOP_PHONE = re.sub(r"\D", "", shop_fields.get("phone", ""))
+SHOP_TG = shop_fields.get("tg", "")
+if not re.fullmatch(r"7\d{10}", SHOP_PHONE):
+    ERR.append(f"data.js: SHOP.phone {shop_fields.get('phone')!r} не читается как +7 (XXX) XXX-XX-XX")
+if not re.fullmatch(r"[A-Za-z]\w{4,31}", SHOP_TG):
+    ERR.append(f"data.js: SHOP.tg {SHOP_TG!r} — не telegram-имя")
+
+tel_links = {re.sub(r"\D", "", h) for h in re.findall(r'href="tel:([^"]+)"', html)}
+if not tel_links:
+    ERR.append("на витрине не осталось ни одной tel:-ссылки — позвонить гостю не предлагается")
+elif tel_links != {SHOP_PHONE}:
+    ERR.append("tel:-ссылки ведут не на номер из data.js: " + ", ".join(sorted(tel_links)))
+shown_nums = {re.sub(r"\D", "", x) for x in re.findall(r"\+7[\d\s()\-]{9,}", plain)}
+if shown_nums != {SHOP_PHONE}:
+    ERR.append("видимый номер на странице расходится с data.js: "
+               + (", ".join(sorted(shown_nums)) or "ни одного номера на витрине не видно"))
+chat_links = {c for c in re.findall(r"https?://t\.me/([^\"'\s/$\\]+)", html + "\n" + js)}
+if not chat_links:
+    ERR.append("ссылок в чат магазина нет вообще — заявку отправлять некуда")
+elif chat_links != {SHOP_TG}:
+    ERR.append("ссылки t.me ведут не в чат из data.js: " + ", ".join(sorted(chat_links)))
+if not re.search(r"t\.me/\$\{SHOP\.tg\}", data_js):
+    ERR.append("data.js: ссылка чата собрана не из SHOP.tg — чат может уехать на сторону")
+
+# Зона доставки: одна формулировка на чип, счёт, бейдж заявки и ответы чата.
+zone = re.search(r"const DELIVERY_ZONE\s*=\s*'([^']+)'", data_js)
+zone_short = re.search(r"const DELIVERY_ZONE_SHORT\s*=\s*'([^']+)'", data_js)
+fee = re.search(r"const COURIER_FEE\s*=\s*(\d+)", data_js)
+if not zone or not zone_short:
+    ERR.append("data.js: нет DELIVERY_ZONE — каждая надпись про доставку называет зону сама")
+else:
+    ZONE, ZONE_SHORT = zone.group(1), zone_short.group(1)
+    for claim in ("по СПб", "по Петербургу", "по всему городу", "по всей области", "по Москве"):
+        if claim in html or claim in js:
+            ERR.append(f"зона доставки «{claim}» никем не подтверждена — в data.js «{ZONE}»")
+    named = set(re.findall(r"[КК]урьер по ([А-ЯЁ][а-яё]+)|[ДД]оставка по ([А-ЯЁ][а-яё]+)", html + "\n" + js))
+    off = sorted({a or b for a, b in named if (a or b) not in ZONE})
+    if off:
+        ERR.append("зона доставки разошлась с data.js: " + ", ".join(off) + f" против «{ZONE}»")
+    chip = re.search(r'data-delivery="courier"[^>]*>([^<]+)<', html)
+    if not chip:
+        ERR.append("в пакете нет чипа курьера — способ доставки выбирается непонятно чем")
+    elif ZONE_SHORT not in chip.group(1) or not fee or f"{fee.group(1)} ₽" not in chip.group(1):
+        ERR.append(f"чип курьера разошёлся с данными: «{chip.group(1).strip()}», а ждём «{ZONE_SHORT}» "
+                   f"и {fee.group(1) if fee else 'неизвестный'} ₽")
 
 rv = re.search(r'<section[^>]*id="reviews"[\s\S]*?</section>', html)
 if not rv:
@@ -563,6 +625,8 @@ else:
         r"\+7[\d\s()\-]{9,}", re.sub(r'<script type="application/ld\+json"[^>]*>[\s\S]*?</script>', " ", html))}
     if ld_phone and ld_phone not in visible:
         ERR.append("JSON-LD: телефон магазина не совпадает ни с одним видимым номером")
+    if ld_phone != SHOP_PHONE:
+        ERR.append("JSON-LD: телефон магазина не совпадает с номером из js/data.js")
 def visible_faq_pairs(src):
     pairs = []
     for body in re.findall(r'<details class="faq-item"[^>]*>([\s\S]*?)</details>', src):
@@ -586,8 +650,8 @@ if faq:
     for q in faq.get("mainEntity", []):
         if not q.get("name") or not q.get("acceptedAnswer", {}).get("text"):
             ERR.append("JSON-LD: вопрос FAQ без ответа")
-        if "цена" in q.get("name", "").lower() and "Whats" not in q.get("acceptedAnswer", {}).get("text", ""):
-            NOTES.append("FAQ про цены: сверить, что ответ ведёт в WhatsApp, а не обещает сумму")
+        if "цена" in q.get("name", "").lower() and "telegram" not in q.get("acceptedAnswer", {}).get("text", "").lower():
+            NOTES.append("FAQ про цены: сверить, что ответ ведёт в Telegram, а не обещает сумму")
 if catalog:
     names = [i.get("name") for i in catalog.get("itemListElement", [])]
     if len(names) != len(PRODUCTS):
@@ -606,16 +670,16 @@ if not PS or not GS:
 else:
     p_sizes = [tuple(map(int, s)) for s in re.findall(r"\((\d+),\s*(\d+)\)", PS.group(1))]
     g_sizes = [tuple(map(int, s)) for s in re.findall(r"\((\d+),\s*(\d+)\)", GS.group(1))]
-    call_p = {tuple(map(int, s)) for s in re.findall(r"pexels\(p\.photo,\s*(\d+),\s*(\d+)\)", app_js)}
-    call_g = {tuple(map(int, s)) for s in re.findall(r"pexels\((?:g|item)\.photo,\s*(\d+),\s*(\d+)\)", app_js)}
+    call_p = {tuple(map(int, s)) for s in re.findall(r"photoSrc\(p\.photo,\s*(\d+),\s*(\d+)\)", app_js)}
+    call_g = {tuple(map(int, s)) for s in re.findall(r"photoSrc\((?:g|item)\.photo,\s*(\d+),\s*(\d+)\)", app_js)}
     for size in sorted(call_p - set(p_sizes)):
         ERR.append(f"build.py не скачивает {size[0]}x{size[1]} — карточка останется без фото")
     for size in sorted(call_g - set(g_sizes)):
         ERR.append(f"build.py не скачивает галерейный {size[0]}x{size[1]}")
     for size in sorted(set(p_sizes) - call_p - set(g_sizes) - set(call_g)):
         NOTES.append(f"build.py тащит неиспользуемый размер товаров {size[0]}x{size[1]}")
-    if not re.search(r"pexels\(", app_js):
-        ERR.append("js/app.js не вызывает pexels() — картинки собираются незнамо откуда")
+    if not re.search(r"photoSrc\(", app_js):
+        ERR.append("js/app.js не вызывает photoSrc() — картинки собираются незнамо откуда")
     want = {f"{p['photo']}-{w}x{h}.jpg" for p in PRODUCTS for w, h in p_sizes}
     want |= {f"{g['photo']}-{w}x{h}.jpg" for g in GALLERY for w, h in g_sizes}
     want |= {f"{m[0]}-{m[1]}x{m[2]}.jpg" for m in re.findall(r"assets/img/(\d+)-(\d+)x(\d+)\.jpg", html)}
@@ -711,7 +775,7 @@ for f in core:
     if rel and not (ROOT / rel).exists() and not SKIP:
         ERR.append(f"sw.js кэширует несуществующий {f}")
 for must in ("./index.html", "./css/style.css", "./js/app.js", "./js/data.js", "./js/app-head.js",
-             "./assets/fonts.css", "./manifest.webmanifest"):
+             "./assets/fonts.css", "./manifest.webmanifest", "./assets/qr.svg"):
     if must not in core:
         ERR.append(f"sw.js: оболочка офлайна неполная — нет {must}")
 if "assets/img" in sw_src:
@@ -721,6 +785,95 @@ for retired in ("js/main.js", "js/theme.js", "css/themes.css", "vendor/", "asset
         ERR.append(f"след удалённого файла {retired} всё ещё подключается")
 if not re.search(r"navigator\.serviceWorker\.register", js):
     ERR.append("sw.js лежит в репозитории, но его никто не регистрирует")
+
+# ======================================================= 8a. QR-КОД ВИТРИНЫ ====
+# Камера читает то, что нарисовано, а не то, что задумано: разбираем геометрию
+# assets/qr.svg в матрицу модулей и сверяем её с адресом из canonical. Код печатает
+# tools/build.py, поэтому расхождение значит, что в прод уехал чужой адрес.
+def qr_modules(svg):
+    """Тёмные модули из SVG-геометрии (M/m/H/h/V/v), обрезанные по габариту. None — мусор."""
+    sc, wd = re.search(r'transform="scale\((\d+(?:\.\d+)?)\)"', svg), re.search(r'\bwidth="(\d+)"', svg)
+    if not (sc and wd):
+        return None
+    scale = float(sc.group(1))
+    side = int(round(int(wd.group(1)) / scale))
+    if not 21 <= side <= 177:
+        return None
+    cells = [[False] * side for _ in range(side)]
+    runs = 0
+    for path in re.findall(r'<path[^>]*\bstroke="[^"]+"[^>]*\bd="([^"]+)"', svg):
+        x = y = 0.0
+        for cmd, nums in re.findall(r"([A-Za-z])([^A-Za-z]*)", path):
+            vals = [float(v) for v in re.findall(r"-?\d+(?:\.\d+)?", nums)]
+            if cmd in "Mm":
+                if len(vals) < 2:
+                    return None
+                x, y = (x + vals[0], y + vals[1]) if cmd.islower() else (vals[0], vals[1])
+            elif cmd in "HhVv":
+                for d in vals:
+                    if cmd in "Hh":
+                        row, c0, c1 = int(y), min(x, x + d), max(x, x + d)
+                        if not 0 <= row < side:
+                            return None
+                        for c in range(int(math.floor(c0)), int(math.ceil(c1))):
+                            if not 0 <= c < side:
+                                return None
+                            cells[row][c] = True
+                        x += d
+                    else:
+                        col, r0, r1 = int(x), min(y, y + d), max(y, y + d)
+                        if not 0 <= col < side:
+                            return None
+                        for r in range(int(math.floor(r0)), int(math.ceil(r1))):
+                            if not 0 <= r < side:
+                                return None
+                            cells[r][col] = True
+                        y += d
+                    runs += 1
+            elif cmd not in "Zz":
+                return None
+    rows = [r for r in cells if any(r)]
+    if runs < 40 or len(rows) < 21:
+        return None
+    lo = min(r.index(True) for r in rows)
+    hi = max(len(r) - 1 - r[::-1].index(True) for r in rows)
+    crop = [row[lo:hi + 1] for row in rows]
+    if len(crop) != len(crop[0]):          # QR-символ всегда квадратный
+        return None
+    return crop
+
+
+qr_file = ROOT / "assets" / "qr.svg"
+qr_err = re.search(r'QR_ERROR = "([A-Za-z])"', build_src)
+qr_html = re.findall(r'<img[^>]*\bsrc="\./assets/qr\.svg"[^>]*>', html)
+if len(qr_html) != 1:
+    ERR.append(f"QR-код на витрине должен стоять ровно один раз, а их {len(qr_html)}")
+elif not re.search(r'alt="[^"]*QR', qr_html[0]):
+    ERR.append("у картинки с QR нет alt со словом QR — скринридер молчит, гость не поймёт, что там")
+if "./assets/qr.svg" not in core:
+    ERR.append("sw.js: QR не лежит в прекеши — офлайн-страница покажет пустой квадрат")
+if not qr_err:
+    ERR.append("build.py: не разобрать QR_ERROR — матрицу кода сверить нечем")
+if not qr_file.exists():
+    if not SKIP:
+        ERR.append("нет собранного assets/qr.svg — гостю нечего сканировать")
+else:
+    qr_svg = qr_file.read_text(encoding="utf-8")
+    drawn = qr_modules(qr_svg)
+    if drawn is None:
+        ERR.append("assets/qr.svg: матрица модулей не читается — на витрине не QR")
+    elif "xmlns" not in qr_svg:
+        ERR.append("assets/qr.svg: нет xmlns — как файл его браузер не покажет")
+    elif qr_err:
+        try:
+            import segno
+            want = [list(map(bool, row)) for row in segno.make(SITE_URL, error=qr_err.group(1)).matrix]
+        except ImportError:
+            NOTES.append("нет модуля segno — содержимое assets/qr.svg сверить нечем (pip install segno)")
+        else:
+            if drawn != want:
+                ERR.append(f"assets/qr.svg ведёт не на {SITE_URL}: матрица модулей другая")
+
 
 # ================================================== 9. CSS: ПАЛИТРЫ И ПРАВИЛА ====
 palettes = {}

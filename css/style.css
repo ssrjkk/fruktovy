@@ -318,8 +318,8 @@ textarea:focus-visible, summary:focus-visible, [tabindex]:not([tabindex="-1"]):f
   border: 1.5px solid var(--border-strong);
 }
 .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
-/* WhatsApp — единственный мессенджер лавки; цвет берём из темы, а не из бренд-палитры. */
-.btn-wa { border-color: var(--fresh); color: var(--fresh); font-weight: 800; }
+/* Telegram — единственный мессенджер лавки; контур кнопки берём из темы. */
+.btn-tg { border-color: var(--fresh); color: var(--fresh); font-weight: 800; }
 
 /* ==========================================================================
    3. MARKET AWNING & STICKY HEADER
@@ -2095,7 +2095,8 @@ dialog::backdrop {
   font-weight: 800;
 }
 
-/* Пиллы связи: WhatsApp + два телефона. Чужих бренд-цветов тут нет —
+/* Пиллы связи: Telegram + телефон. Пилюля мессенджера одна, цвет её — фирменный синий Telegram,
+   текст почти чёрный: так контраст держится во всех пяти палитрах, а не только в светлой.
    каналы только те, что реально есть у лавки. */
 .messenger-grid {
   display: flex;
@@ -2118,10 +2119,29 @@ dialog::backdrop {
 }
 .msg-pill:hover { transform: translateY(-1px); filter: brightness(1.07); }
 /* Двойной класс: цвет перебивает и .msg-pill, и .hub-m-btn с их белым текстом. */
-.msg-pill.msg-wa, .hub-m-btn.msg-wa { background: #25D366; color: #0B3A22; }
+.msg-pill.msg-tg, .hub-m-btn.msg-tg { background: #229ED9; color: #052231; }
 .msg-pill.msg-call, .hub-m-btn.msg-call { background: var(--brand); color: var(--brand-ink); }
-.msg-pill.msg-call2, .hub-m-btn.msg-call2 { background: var(--accent); color: var(--accent-ink); }
 
+/* QR ведёт ровно на канонический адрес — его рисует tools/build.py, а гейт сверяет
+   матрицу с SITE_URL. Подложка белая во всех палитрах: камере нужен максимальный
+   контраст модулей, а не наша тема. */
+.qr-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 18px;
+  background: var(--surface);
+}
+.qr-card img { flex: 0 0 auto; width: 128px; height: 128px; border-radius: 10px; background: #FFFFFF; }
+.qr-card-lead { font-size: 14px; font-weight: 800; margin-bottom: 4px; }
+.qr-card-note { margin: 0 0 6px; font-size: 13px; line-height: 1.45; color: var(--ink-muted); }
+.qr-card-url { display: inline-block; font-size: 12px; font-weight: 700; color: var(--brand); word-break: break-all; }
+@media (max-width: 420px) {
+  .qr-card { flex-direction: column; align-items: flex-start; }
+}
+ 
 /* Floating Messenger Dock & In-Store Live Chat */
 .floating-hub {
   position: fixed;
@@ -2336,7 +2356,7 @@ dialog::backdrop {
 @media print {
   /* Кнопки и поля на бумаге ничего не делают: часть из них — фильтр, часть — модальное
      окно пакета. Печатается только то, что можно прочитать или набрать. */
-  .site-header, .market-awning, .hero-arches, .ticker, .builder, #builder, .chat-widget, .chat-fab,
+  .site-header, .market-awning, .hero-arches, .ticker, #builder, .chat-widget, .chat-fab,
   .floating-hub, .hub-messengers, .card-media, .card-action-slot, .cart-foot, .modal-close, dialog,
   .cat-tab, .size-pill, .month-btn, .season-chip, .view-btn, .preset-btn, .swatch-btn,
   .theme-pill, .wish-chip, .select-ctrl, .peek-trigger, .card-add-btn, .fav-btn,

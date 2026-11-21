@@ -30,7 +30,7 @@ var localStorage = {
   setItem: function (k, v) { mem[k] = String(v); },
   removeItem: function (k) { delete mem[k]; }
 };
-var nodes = {}, created = 0, opened = [];
+var nodes = {}, created = 0, opened = [], openArgs = [], commands = [], copiedFrom = null;
 function el(id) {
   if (!nodes[id]) {
     nodes[id] = {
@@ -44,7 +44,8 @@ function el(id) {
       addEventListener: function () {}, removeEventListener: function () {},
       setAttribute: function (k, v) { this.attrs[k] = v; }, getAttribute: function (k) { return this.attrs[k] || null; },
       getBoundingClientRect: function () { return { top: 0, left: 0, width: 10, height: 10, right: 10, bottom: 10 }; },
-      scrollIntoView: function () {}, focus: function () {}, select: function () {}, remove: function () {},
+      scrollIntoView: function () {}, focus: function () {}, remove: function () {},
+      select: function () { copiedFrom = this.value; },
       closest: function () { return null; }, matches: function () { return false; }, click: function () {}
     };
   }
@@ -60,10 +61,11 @@ var document = {
   querySelector: function (s) { return el('sel:' + s); },
   querySelectorAll: function () { return []; },
   createElement: function (t) { return el('new:' + t + ':' + (created++)); },
+  execCommand: function (c) { commands.push(c); return c === 'copy'; },
   addEventListener: function () {}, removeEventListener: function () {}
 };
 var window = {
-  open: function (u) { opened.push(u); return null; },
+  open: function (u, tgt, feats) { opened.push(u); openArgs.push([tgt, feats]); return null; },
   matchMedia: function () { return { matches: false, addEventListener: function () {}, addListener: function () {} }; },
   addEventListener: function () {}, removeEventListener: function () {},
   requestAnimationFrame: function () { return 0; }, scrollTo: function () {}
@@ -159,13 +161,20 @@ var allText = [t1, t2, buildOrderText()].join('\n');
 ok('в тексте заявки нет рублей', allText.indexOf('₽') === -1);
 ok('в тексте заявки нет платёжной лексики', !/оплат|карт|СБП|эквайринг|скидка применена/i.test(allText));
 ok('промокод — метка, а не математика', typeof PROMOS['РЫНОК10'].label === 'string' && PROMOS['РЫНОК10'].label.length > 0);
+ok('промокод не обещает скидку цифрой', !/\d+\s*%|минус\s*\d|\d+\s*₽/.test(PROMOS['РЫНОК10'].label + PROMOS['ПРИВЕТ'].label));
 
-/* --- отправка: открывается wa.me, своего бэкенда у сайта нет --- */
-opened.length = 0;
-sendWhatsAppOrder();
-ok('открыт ровно один wa.me', opened.length === 1 && opened[0].indexOf('https://wa.me/') === 0);
-ok('ссылка URL-закодирована', opened[0].indexOf(' ') === -1 && opened[0].indexOf('%D0') !== -1);
-ok('пустой пакет не отправляется', (function () { state.cart = {}; opened.length = 0; sendWhatsAppOrder(); return opened.length === 0; })());
+/* --- отправка: открывается чат магазина, своего бэкенда у сайта нет --- */
+state.cart = { apple: 2, spices: 1 }; state.promoCode = null; state.delivery = 'pickup'; state.wishes = new Set();
+opened.length = 0; openArgs.length = 0; commands.length = 0; copiedFrom = null;
+sendChatOrder();
+ok('открыт ровно один чат', opened.length === 1 && openArgs.length === 1);
+ok('чат = SHOP.tg из data.js', opened[0] === 'https://t.me/' + SHOP.tg);
+ok('в новый таб и с noopener', openArgs[0][0] === '_blank' && /noopener/.test(openArgs[0][1] || ''));
+ok('список пакета копируется в буфер', commands.indexOf('copy') !== -1 && /Яблоки/.test(copiedFrom || ''));
+ok('пустой пакет не отправляется', (function () {
+  state.cart = {}; opened.length = 0; commands.length = 0; sendChatOrder();
+  return opened.length === 0 && commands.length === 0;
+})());
 
 /* --- тема: применяется только заявленная палитра --- */
 applyTheme('night');

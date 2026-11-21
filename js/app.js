@@ -3,7 +3,7 @@
 
    Деньги намеренно отсутствуют: цену на завоз дня называет продавец, поэтому в пакет,
    в текст заявки и в разметку не попадает ни одна сумма. Заявка уходит одним сообщением
-   в WhatsApp; своего бэкенда у сайта нет, а значит и хранить нечего — всё живёт
+   в Telegram; своего бэкенда у сайта нет, а значит и хранить нечего — всё живёт
    в localStorage под ключами KEYS.
 
    Тесты пакета (tools/test_cart.py) вырезают тело этой IIFE и гоняют его в quickjs,
@@ -119,7 +119,7 @@
       const dot = document.getElementById('statusDot');
       const txt = document.getElementById('statusText');
       if (dot) dot.classList.toggle('is-closed', !isOpen);
-      if (txt) txt.textContent = isOpen ? 'Открыто сегодня до 21:00 · Сытнинская, 12' : 'Откроемся завтра в 08:00 · Заказ в WhatsApp круглосуточно';
+      if (txt) txt.textContent = isOpen ? 'Открыто сегодня до 21:00 · Сытнинская, 12' : 'Откроемся завтра в 08:00 · Заявка в Telegram круглосуточно';
     } catch (err) {}
   }
 
@@ -248,7 +248,7 @@
       return `
             <article class="chalk-hit">
               <div class="chalk-hit-top">
-                <img src="${pexels(p.photo, 200, 200)}" alt="${p.name}" width="64" height="64" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
+                <img src="${photoSrc(p.photo, 200, 200)}" alt="${p.name}" width="64" height="64" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
                 <div>
                   <h3>${p.name}</h3>
                   <p>${p.tag} · цена по запросу</p>
@@ -304,7 +304,7 @@
             <div class="card-sheen" aria-hidden="true"></div>
             <div class="card-media">
               <div class="card-media-clip">
-                <img src="${pexels(p.photo, 640, 480)}" alt="${p.name}" width="640" height="480" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
+                <img src="${photoSrc(p.photo, 640, 480)}" alt="${p.name}" width="640" height="480" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
               </div>
               <div class="card-badges">
                 ${seasonal ? '<span class="badge badge-season">В сезоне</span>' : ''}
@@ -416,12 +416,12 @@
     const row = AISLES.find(r => r.id === p.cat);
     const img = document.getElementById('product-main-img');
     delete img.dataset.fbApplied;
-    img.src = pexels(p.photo, 900, 675);
+    img.src = photoSrc(p.photo, 900, 675);
     img.alt = p.name;
     img.onerror = () => window.__fdImgFallback(img, p.color, p.name);
     document.getElementById('peekThumbs').innerHTML = PEEK_ANGLES.map((a, i) => `
           <button type="button" class="peek-thumb-btn" data-peek-angle="${i}" aria-pressed="${i === 0}">
-            <img src="${pexels(p.photo, 240, 180)}" alt="${p.name} — ${a.label}" style="transform:${a.transform};filter:${a.filter};" data-fb-color="${p.color}" data-fb-label="${p.name}">
+            <img src="${photoSrc(p.photo, 240, 180)}" alt="${p.name} — ${a.label}" style="transform:${a.transform};filter:${a.filter};" data-fb-color="${p.color}" data-fb-label="${p.name}">
             <span class="peek-thumb-lbl">${a.label}</span>
           </button>
         `).join('');
@@ -493,7 +493,7 @@
         const rot = ((idx % 2 === 0 ? -1 : 1) * (4 + (idx % 3) * 3));
         return `
               <button type="button" class="crate-token" data-peek="${p.id}" title="${p.name}" style="--tz:${tz}px;--rot:${rot}deg;">
-                <img src="${pexels(p.photo, 140, 140)}" alt="${p.name}" width="50" height="50" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
+                <img src="${photoSrc(p.photo, 140, 140)}" alt="${p.name}" width="50" height="50" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
               </button>
             `;
       }).join('');
@@ -504,7 +504,7 @@
     }) => `
           <div class="builder-row">
             <div style="display:flex;align-items:center;gap:11px;min-width:0;">
-              <img src="${pexels(p.photo, 140, 140)}" alt="" width="40" height="40" class="builder-row-thumb" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
+              <img src="${photoSrc(p.photo, 140, 140)}" alt="" width="40" height="40" class="builder-row-thumb" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
               <div style="min-width:0;">
                 <button type="button" data-peek="${p.id}" style="font-weight:800;font-size:14px;text-align:left;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;">${p.name}</button>
                 <span style="font-size:12px;color:var(--ink-muted);">${p.tag}${inSeason(p) ? ' · в сезоне' : ''}</span>
@@ -528,7 +528,7 @@
     document.getElementById('cartSub').textContent = count ? `${count} поз. · ${formatKg(kg)}` : 'Пока пусто';
     document.getElementById('meterKg').textContent = formatKg(kg);
     document.getElementById('meterFill').style.width = `${Math.min(100, Math.round((count / 6) * 100))}%`;
-    document.getElementById('meterLabel').textContent = state.delivery === 'courier' ? `Курьер по СПб ${formatRub(COURIER_FEE)}, бесплатно от ${formatRub(FREE_DELIVERY_FROM)}` : 'Самовывоз со Сытнинской, 12 — бесплатно';
+    document.getElementById('meterLabel').textContent = state.delivery === 'courier' ? `Курьер ${DELIVERY_ZONE} ${formatRub(COURIER_FEE)}, бесплатно от ${formatRub(FREE_DELIVERY_FROM)}` : 'Самовывоз со Сытнинской, 12 — бесплатно';
     document.getElementById('sumItems').textContent = String(count);
     document.getElementById('sumWeight').textContent = count ? formatKg(kg) : '—';
     const promoRow = document.getElementById('sumPromoRow');
@@ -551,7 +551,7 @@
       if (!p) return '';
       return `
             <div class="cart-item">
-              <img src="${pexels(p.photo, 140, 140)}" alt="${p.name}" width="52" height="52" data-fb-color="${p.color}" data-fb-label="${p.name}">
+              <img src="${photoSrc(p.photo, 140, 140)}" alt="${p.name}" width="52" height="52" data-fb-color="${p.color}" data-fb-label="${p.name}">
               <div style="flex:1;min-width:0;">
                 <div style="font-weight:800;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${p.name}</div>
                 <div style="font-size:12px;color:var(--ink-muted);">${p.tag} · цена по запросу</div>
@@ -581,7 +581,19 @@
     return [ref ? `Заявка ${ref} с сайта «Фруктовый дворец»:` : 'Здравствуйте! Заявка с сайта «Фруктовый дворец»:', '', ...lines, '', `Позиций: ${count}, примерно ${formatKg(kg)}. Пришлите, пожалуйста, цены сегодняшнего завоза и итог.`, state.delivery === 'courier' ? `Курьером: ${contact ? contact.address : 'адрес уточню'} · время: ${contact ? contact.slot : 'любое'}` : 'Заберу сам: Сытнинская, 12', state.promoCode ? `Промокод: ${state.promoCode}` : '', wishes ? `Пожелания: ${wishes}` : '', note ? `Комментарий: ${note}` : '', contact ? `Отвечать на: ${contact.phone} (${contact.name})` : ''].filter(Boolean).join('\n');
   }
 
-  function sendWhatsAppOrder() {
+  function copyToClipboard(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  function sendChatOrder() {
     const {
       entries
     } = cartStats();
@@ -593,8 +605,9 @@
       ...state.cart
     };
     writeJSON(KEYS.last, state.lastOrder);
-    window.open(waUrl(buildOrderText()), '_blank', 'noopener,noreferrer');
-    showToast('Открываем WhatsApp со списком пакета');
+    const copied = copyToClipboard(buildOrderText());
+    window.open(chatUrl(), '_blank', 'noopener,noreferrer');
+    showToast(copied ? 'Список скопирован — вставьте его в чат Telegram' : 'Открываем Telegram: список пакета ниже в заявке');
   }
 
   function openCheckout() {
@@ -609,7 +622,7 @@
     document.getElementById('chkAddressBlock').style.display = state.delivery === 'courier' ? 'grid' : 'none';
     document.getElementById('chkSummaryMeta').textContent = `Позиций: ${stats.count}`;
     document.getElementById('chkSummarySub').textContent = formatKg(stats.kg);
-    document.getElementById('chkSummaryExtra').textContent = state.delivery === 'courier' ? `курьер ${formatRub(COURIER_FEE)}, бесплатно от ${formatRub(FREE_DELIVERY_FROM)}` : 'самовывоз, бесплатно';
+    document.getElementById('chkSummaryExtra').textContent = state.delivery === 'courier' ? `курьер ${DELIVERY_ZONE} — ${formatRub(COURIER_FEE)}, бесплатно от ${formatRub(FREE_DELIVERY_FROM)}` : 'самовывоз, бесплатно';
     document.getElementById('chkSummaryTotal').textContent = 'по запросу';
     if (!checkoutDialog.open) checkoutDialog.showModal();
   }
@@ -666,13 +679,14 @@
       ...state.cart
     };
     writeJSON(KEYS.last, state.lastOrder);
-    window.open(waUrl(orderText), '_blank', 'noopener,noreferrer');
-    document.getElementById('successWaLink').href = waUrl(orderText);
+    copyToClipboard(orderText);
+    window.open(chatUrl(), '_blank', 'noopener,noreferrer');
+    document.getElementById('successChatLink').href = chatUrl();
     document.getElementById('successOrderNum').textContent = `Заявка ${ref} отправлена`;
     document.getElementById('successOrderMeta').textContent = `${contact.name}, отвечаем на ${contact.phone} — там же цены и итог этого завоза.`;
     document.getElementById('successReceipt').innerHTML = `
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-            <span class="order-status-badge">${state.delivery === 'courier' ? 'Курьер по СПб' : 'Самовывоз'}</span>
+            <span class="order-status-badge">${state.delivery === 'courier' ? `Курьер ${DELIVERY_ZONE}` : 'Самовывоз'}</span>
             <strong class="tnum">${stats.count} поз. · ${formatKg(stats.kg)}</strong>
           </div>
           <div style="font-size:13px;color:var(--ink-muted);">${items.map(i => `${i.name}× ${i.qty}${i.unit}`).join(', ')}</div>
@@ -685,7 +699,7 @@
     renderCatalog();
     document.getElementById('checkoutFormView').style.display = 'none';
     document.getElementById('checkoutSuccessView').style.display = 'flex';
-    showToast(`Заявка ${ref} — открываем WhatsApp`);
+    showToast(`Заявка ${ref} — открываем Telegram, список скопирован`);
   }
 
   function renderOrdersModal() {
@@ -728,11 +742,11 @@
     b.textContent = text;
     if (handoff) {
       const a = document.createElement('a');
-      a.href = waUrl('Здравствуйте! Вопрос с сайта «Фруктового дворца».');
+      a.href = chatUrl();
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
       a.style.cssText = 'display:inline-block;margin-top:6px;font-weight:800;text-decoration:underline;';
-      a.textContent = 'Написать в WhatsApp →';
+      a.textContent = 'Написать в Telegram →';
       b.appendChild(document.createElement('br'));
       b.appendChild(a);
     }
@@ -742,16 +756,16 @@
 
   function replyToChat(userText) {
     const q = userText.toLowerCase();
-    let reply = 'Я автоматический: отвечаю по тому, что лежит на витрине. Точный ответ и фото сегодняшнего завоза — в WhatsApp.';
+    let reply = 'Я автоматический: отвечаю по тому, что лежит на витрине. Точный ответ и фото сегодняшнего завоза — в Telegram.';
     let handoff = true;
     if (q.includes('сладк') || q.includes('вкусн') || q.includes('хит')) {
       reply = 'Сейчас на прилавке: тонкокорые мандарины с веточкой, мясистые бакинские томаты и мягкая чурчхела на гранатовом соке. Цену назовём при подтверждении — завоз утренний.';
       handoff = false;
     } else if (q.includes('промо') || q.includes('скидк')) {
-      reply = 'Промокоды РЫНОК10 (минус 10%) и ПРИВЕТ (минус 200 ₽) укажите прямо в заявке — скидку учтём в расчёте.';
+      reply = 'Промокоды РЫНОК10 и ПРИВЕТ укажите прямо в заявке — продавец посчитает их вместе с ценами сегодняшнего завоза.';
       handoff = false;
     } else if (q.includes('доставк') || q.includes('самовывоз')) {
-      reply = `Самовывоз со Сытнинской, 12 бесплатный. Курьер по Петроградке и центру — ${formatRub(COURIER_FEE)}, а при заказе от ${formatRub(FREE_DELIVERY_FROM)} привезём бесплатно.`;
+      reply = `Самовывоз со Сытнинской, 12 бесплатный. Курьер ${DELIVERY_ZONE} — ${formatRub(COURIER_FEE)}, а при заказе от ${formatRub(FREE_DELIVERY_FROM)} привезём бесплатно.`;
       handoff = false;
     } else if (q.includes('оплат') || q.includes('карт') || q.includes('сбп')) {
       reply = 'Онлайн-оплаты на сайте нет: цену и итог называем в подтверждении, платите при получении — в лавке или курьеру.';
@@ -761,7 +775,7 @@
   }
 
   function initStoreChat() {
-    appendChatMsg('Здравствуйте! Это подсказки прилавка «Фруктовый дворец» на Сытнинской, 12. Отвечу про спелость, сорт, промокод и доставку — а цены этого завоза и живое фото пришлёт продавец в WhatsApp.', 'bot', true);
+    appendChatMsg('Здравствуйте! Это подсказки прилавка «Фруктовый дворец» на Сытнинской, 12. Отвечу про спелость, сорт, промокод и доставку — а цены этого завоза и живое фото пришлёт продавец в Telegram.', 'bot', true);
   }
 
   function init3DInteractions() {
@@ -869,7 +883,7 @@
     const items = PRODUCTS.filter(p => inSeason(p, state.selectedMonth));
     document.getElementById('seasonChips').innerHTML = items.map(p => `
           <button type="button" class="season-chip" data-peek="${p.id}">
-            <img src="${pexels(p.photo, 120, 120)}" alt="" width="30" height="30" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
+            <img src="${photoSrc(p.photo, 120, 120)}" alt="" width="30" height="30" loading="lazy" decoding="async" data-fb-color="${p.color}" data-fb-label="${p.name}">
             <span>${p.name}</span>
           </button>
         `).join('');
@@ -891,7 +905,7 @@
   function renderGallery() {
     document.getElementById('galleryGrid').innerHTML = GALLERY_ITEMS.map((g, i) => `
           <button type="button" class="gallery-tile" data-lb="${i}">
-            <img src="${pexels(g.photo, 640, 480)}" alt="${g.caption}" width="640" height="480" loading="lazy" decoding="async" data-fb-color="${g.color}" data-fb-label="${g.caption}">
+            <img src="${photoSrc(g.photo, 640, 480)}" alt="${g.caption}" width="640" height="480" loading="lazy" decoding="async" data-fb-color="${g.color}" data-fb-label="${g.caption}">
             <span class="gallery-cap">${g.caption}</span>
           </button>
         `).join('');
@@ -904,7 +918,7 @@
     const img = document.getElementById('lbImg');
     img.classList.remove('is-zoomed');
     delete img.dataset.fbApplied;
-    img.src = pexels(item.photo, 1200, 900);
+    img.src = photoSrc(item.photo, 1200, 900);
     img.alt = item.caption;
     img.onerror = () => window.__fdImgFallback(img, item.color, item.caption);
     document.getElementById('lbCaption').textContent = item.caption;
@@ -1151,7 +1165,7 @@
       if (e.target === cartDialog) cartDialog.close();
     });
     document.getElementById('shareCartBtn').addEventListener('click', copyCartShareLink);
-    document.getElementById('sendWaOrderBtn').addEventListener('click', sendWhatsAppOrder);
+    document.getElementById('sendChatOrderBtn').addEventListener('click', sendChatOrder);
     document.getElementById('openCheckoutBtn').addEventListener('click', openCheckout);
     document.getElementById('clearCartBtn').addEventListener('click', () => {
       if (!Object.keys(state.cart).length) return;

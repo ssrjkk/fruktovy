@@ -34,8 +34,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install pillow rcssmin rjsmin quickjs
-      - name: Build assets (photos, fonts, og, icons, JSON-LD, precache)
+        run: pip install pillow rcssmin rjsmin quickjs segno
+      - name: Build assets (photos, fonts, og, QR, icons, JSON-LD, precache)
         run: python tools/build.py
       - name: Cart unit tests (real JS engine)
         run: python tools/test_cart.py

@@ -1,4 +1,4 @@
-# Фруктовый дворец — витрина с заявкой в WhatsApp
+# Фруктовый дворец — витрина с заявкой в Telegram
 
 Одностраничный сайт магазина «Фруктовый дворец» (Санкт-Петербург, Сытнинская ул., 12):
 каталог из 25 позиций с поиском, рядами и сеткой, пакет с повтором заказа, конструктор
@@ -24,6 +24,10 @@ Chromium (1440×900 и 390×844) и переснятые перед этим р�
 |---|---|---|---|
 | ![пакет](docs/screens/07-basket.jpg) | ![заявка](docs/screens/08-order.jpg) | ![чат](docs/screens/09-chat.jpg) | ![подглядывание](docs/screens/10-peek.jpg) |
 
+| Как найти: адрес, часы, чат и QR на витрину |
+|---|
+| ![визит](docs/screens/11-visit.jpg) |
+
 Пять палитр одного и того же кадра:
 
 | Живой рынок | Светлая | Инжир и золото | Изумруд | Ночной базар |
@@ -47,7 +51,7 @@ js/app.js             приложение: каталог, пакет, конс
 sw.js                 офлайн-кэш (версию проставляет сборка)
 404.html              страница «не найдено» в тех же темах
 manifest.webmanifest  PWA: иконки, цвет, start_url
-tools/build.py        сборка: шрифты, фото, og, SEO-каталог, иконки PWA, минификация
+tools/build.py        сборка: шрифты, фото, og, QR витрины, SEO-каталог, иконки PWA, минификация
 tools/test_cart.py    юнит-тесты пакета в реальном JS-движке (quickjs)
 tools/check.py        гейт качества: разметка, JSON-LD, ссылки, иконки, CSP, палитры, тап-цели
 tools/gate_bite.py    доказательство, что каждый пункт гейта кусается (мутации файлов)
@@ -55,11 +59,20 @@ tools/gate_bite.py    доказательство, что каждый пунк
 docs/screens/             скриншоты живого рендера (1440×900 и 390×844)
 ```
 
+## Открыть витрину на телефоне
+
+![QR-код на сайт](assets/qr.svg)
+
+Наведите камеру — откроется https://ssrjkk.github.io/fruktovy/ . Код рисует `tools/build.py`
+из `<link rel="canonical">`, поэтому он вечный: адрес Pages не меняется, а при смене домена
+QR пересоберётся сам. `tools/check.py` разбирает нарисованную матрицу модулей и сверяет её с
+canonical — «код ведёт не туда» краснеет на сборке.
+
 ## Локальный запуск
 
 ```bash
 python -m venv .venv && . .venv/Scripts/activate   # Windows: .venv\Scripts\activate
-pip install pillow rcssmin rjsmin quickjs
+pip install pillow rcssmin rjsmin quickjs segno
 python tools/build.py               # фото (Pexels) и шрифты (OFL) в assets/, css/js не трогает
 python tools/test_cart.py
 python tools/check.py
@@ -82,8 +95,8 @@ jsmin-версией, а заодно обновляет версию кэша s
 ## Проверки перед push
 
 ```bash
-python tools/check.py        # статика: 169 пунктов
-python tools/gate_bite.py    # 189 мутаций: каждая обязана сломать сборку
+python tools/check.py        # статика: 193 гейта и 14 оборотов FORBIDDEN
+python tools/gate_bite.py    # 214 мутаций: каждая обязана сломать сборку
 ```
 
 `gate_bite.py` правит файлы в рабочей копии и восстанавливает их по снимку; exit 0 означает,
@@ -117,7 +130,7 @@ Canonical-адрес: `https://ssrjkk.github.io/fruktovy/`. При подклю�
 ## Данные и цены
 
 Цен на сайте нет намеренно: `price` и `oldPrice` в `js/data.js` всегда `null`, карточка
-показывает «цена по запросу», а итог пакета продавец называет в WhatsApp. Чтобы включить
+показывает «цена по запросу», а итог пакета продавец называет в Telegram. Чтобы включить
 цены, проставить `price` в данных — корзина, конструктор и SEO подхватят сами, но тогда
 нужен и способ оплаты: сейчас его нет, и кнопка «оформить» открывает заявку, а не чек.
 
@@ -140,8 +153,10 @@ Canonical-адрес: `https://ssrjkk.github.io/fruktovy/`. При подклю�
 ## Что нужно от магазина, чтобы сайт работал сам
 
 - Свои снимки прилавка вместо стоковых: сейчас группы товаров делят одни и те же фото.
-- Часы работы и оба телефона: они живут в `SHOP`, а `openingHours`, `telephone` и
-  `alternateTelephone` в JSON-LD гейт сверяет с `data.js` — разъезд ломает сборку.
+- Один телефон и один чат вместо двух номеров и мессенджера: `SHOP.phone` и `SHOP.tg` в
+  `js/data.js` — единственный источник. Гейт сверяет с ними `telephone` в JSON-LD, каждую
+  `tel:-ссылку`, каждую ссылку `t.me` и номер, который видит глаз; плюс запрещает любые
+  чужие мессенджеры и соцсети. Разъезд ломает сборку.
 - Домен: при подключении достаточно заменить адрес в `index.html` (canonical, og:url),
   `robots.txt` и `sitemap.xml`.
 - Цены — если решат их показывать: тогда пакет и конструктор начнут считать итог сами.
@@ -160,14 +175,14 @@ Canonical-адрес: `https://ssrjkk.github.io/fruktovy/`. При подклю�
 
 Single-page storefront for a fruit and vegetable shop in Saint Petersburg: 25 catalog
 positions, search, aisle/grid views, an order basket, crate builder, seasonal calendar and
-gallery. No prices and no payments are shown — the seller names the day's price in WhatsApp,
+gallery. No prices and no payments are shown — the seller names the day's price in Telegram,
 and checkout opens a messenger request.
 Vanilla HTML/CSS/JS, all assets self-hosted, zero trackers, no third-party JS libraries.
 Five palettes share one markup and one stylesheet: each is a `html[data-theme="…"]` token
 block, the choice is stored in `localStorage` (`fd.theme`) and applied before first paint by
 `js/app-head.js`. CI (`quality` job) runs a secret scan, builds assets (Pexels photos, OFL
-fonts), executes basket unit tests in a real JS engine and a 169-point quality gate, then
-deploys to GitHub Pages. Run locally: `pip install pillow rcssmin rjsmin quickjs`, then
+fonts), executes basket unit tests in a real JS engine and a 193-check quality gate, then
+deploys to GitHub Pages. Run locally: `pip install pillow rcssmin rjsmin quickjs segno`, then
 `python tools/build.py && python tools/test_cart.py && python tools/check.py`
 (plain `build.py` leaves css/js readable; the minifying step is `--minify` and belongs to CI,
 see «Локальный запуск»).
