@@ -2844,6 +2844,12 @@
                 <li><strong style="color:var(--ink);">Режим работы:</strong> ежедневно 08:00–21:00</li>
                 <li><strong style="color:var(--ink);">Телефон и связь:</strong> +7 (999) 203-56-45 · @ssrjkk</li>
               </ul>
+              <div style="margin-top:14px;padding-top:14px;border-top:1px dashed var(--border-strong);display:flex;flex-wrap:wrap;align-items:center;gap:14px;">
+                <img src="assets/qr.svg" width="240" height="240" loading="lazy" decoding="async"
+                     alt="QR-код на эту же витрину: наведите камеру телефона"
+                     style="width:240px;height:240px;background:#FFF;border:1px solid var(--border-strong);padding:8px;">
+                <p style="margin:0;max-width:260px;font-size:14px;line-height:1.5;color:var(--ink-muted);">Наведите камеру телефона на код — откроется эта же витрина, чтобы выбрать прямо у прилавка и собрать пакет с телефона.</p>
+              </div>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:10px;">
               <a href="https://yandex.ru/maps/?text=%D0%A1%D0%B0%D0%BD%D0%BA%D1%82-%D0%9F%D0%B5%D1%82%D0%B5%D1%80%D0%B1%D1%83%D1%80%D0%B3%2C%20%D0%A1%D1%8B%D1%82%D0%BD%D0%B8%D0%BD%D1%81%D0%BA%D0%B0%D1%8F%2012" target="_blank" rel="noopener noreferrer" class="btn btn-brand">
@@ -4084,7 +4090,7 @@
           reply = `Самовывоз с Сытнинской, 12 всегда бесплатный. Курьер по Петроградке и центру — 250 ₽, а при заказе от ${formatRub(FREE_DELIVERY_FROM)} привезём бесплатно!`;
           addLink = false;
         } else if (q.includes('оплат') || q.includes('карт') || q.includes('сбп')) {
-          reply = 'Оплатить можно прямо на сайте через СБП (QR), банковской картой или при получении курьеру / на кассе.';
+          reply = 'Онлайн-эквайринг на сайте не подключён: отправьте пакет в Telegram — придёт счёт СБП или на карту, либо оплатите курьеру или на кассе при получении.';
           addLink = false;
         }
         setTimeout(() => appendChatMsg(reply, 'bot', addLink), 450);
