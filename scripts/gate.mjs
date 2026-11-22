@@ -284,7 +284,12 @@ ok((PAGE404.match(/assets\//g) || []).length >= 3 && !/css\/style\.css/.test(PAG
 /* ---------- 13. ссылки на мессенджеры ---------- */
 const tgLinks = [...new Set([...PAGE.matchAll(/href="(https:\/\/t\.me\/[^"]+)"/g)].map((m) => m[1]))];
 ok(tgLinks.length === 1 && tgLinks[0] === 'https://t.me/ssrjkk', 'все мессенджеры ведут в @ssrjkk', tgLinks.join(', '));
-ok(/tel:\+79992035645|7 \(999\) 203-56-45/.test(PAGE), 'телефон лавки указан');
+ok(/tel:\+79516450330/.test(PAGE) && /tel:\+79052676774/.test(PAGE) && !/999[ -]?203[ -]?56[ -]?45/.test(PAGE),
+   'телефоны сверены с карточкой Яндекс Карт, placeholder убран');
+const pill = (PAGE.match(/class="yandex-rating-pill"[\s\S]{0,320}?<\/a>/) || [''])[0];
+ok(/4,7 на Яндекс Картах · 39 оценок · 22 отзыва/.test(pill) &&
+   /yandex\.ru\/maps\/org\/fruktovy_dvorets\/60838532953\//.test(pill),
+   'плашка рейтинга — verified числа и ссылка на карточку', pill.replace(/\s+/g, ' ').slice(0, 120));
 
 /* ---------- итог ---------- */
 console.log(`\nГЕЙТ ВИТРИНЫ: проверок ${checks}, провалов ${fails.length}`);
