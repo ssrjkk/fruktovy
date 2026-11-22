@@ -1,11 +1,20 @@
+# Локальные артефакты инструментов
 chat-export-*.json
 vendor/
-assets/img/
-assets/fonts/
-assets/fonts.css
-assets/og.png
-assets/icon-192.png
-assets/icon-512.png
-assets/CREDITS.txt
 __pycache__/
 .venv/
+*.pyc
+
+# Временные файлы проверок, которые делают на машине
+_s*.js
+_before_*.html
+_gate_logs/
+_shots/
+_dl_report.json
+audit_scratch/
+
+# Готовый архив релиза не версионируется
+fruktovy-dvorets-release.zip
+
+# Ассеты витрины (фото, шрифты, иконки, og) теперь обычные файлы репозитория:
+# страница живёт без сборки и без внешних CDN, значит они обязаны быть в git.

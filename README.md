@@ -1,16 +1,21 @@
 # Фруктовый дворец — витрина с заявкой в Telegram
 
-Одностраничный сайт магазина «Фруктовый дворец» (Санкт-Петербург, Сытнинская ул., 12):
+Одностраничный сайт лавки «Фруктовый дворец» (Санкт-Петербург, Сытнинская ул., 12):
 каталог из 25 позиций с поиском, рядами и сеткой, пакет с повтором заказа, конструктор
-ящиков, сезонный календарь, галерея с лайтбоксом, пять тем оформления, подсказки прилавка.
-Оплата не принимается — итог по позиции называет продавец в ответ на заявку.
-Чистые HTML/CSS/JS без фреймворков и без сторонних библиотек; шрифты и фото собирает CI,
-трекеров нет.
+ящика, сезонный календарь, галерея с лайтбоксом, пять тем оформления, 2D и 3D-карточки,
+чат с продавцом и выгрузка всего проекта в ZIP прямо из браузера.
+
+Оплата на сайте не принимается: чекаут формирует заявку, счёт СБП или на карту приходит
+продавцу в Telegram, либо покупатель платит при получении. Онлайн-эквайринг не подключён.
+
+Витрина собирается без сборки: один `index.html` со своими стилями и скриптами, фото,
+шрифты, иконки и превью лежат в репозитории. Сторонних запросов нет — ни CDN, ни шрифтов
+Google, ни пикселей аналитики; границы заданы CSP-заголовком в `<head>`.
 
 ## Витрина на скриншотах
 
-Снимки — не макеты и не генерация: это живые рендеры локальной сборки, снятые headless
-Chromium (1440×900 и 390×844) и переснятые перед этим релизом.
+Снимки — живые рендеры этой же сборки, снятые headless Chrome в 1440x900 и 390x844:
+это экраны страницы, а не макеты и не генерация изображений.
 
 | Первый экран | Ряды прилавка | Грифельная доска |
 |---|---|---|
@@ -20,169 +25,182 @@ Chromium (1440×900 и 390×844) и переснятые перед этим р�
 |---|---|---|
 | ![ящик](docs/screens/04-builder.jpg) | ![галерея](docs/screens/05-gallery.jpg) | ![вопросы](docs/screens/06-faq.jpg) |
 
-| Пакет | Заявка | Подсказки прилавка | Подглядывание в карточке |
+| Пакет | Заявка | Чат | Быстрый просмотр |
 |---|---|---|---|
-| ![пакет](docs/screens/07-basket.jpg) | ![заявка](docs/screens/08-order.jpg) | ![чат](docs/screens/09-chat.jpg) | ![подглядывание](docs/screens/10-peek.jpg) |
+| ![пакет](docs/screens/07-basket.jpg) | ![заявка](docs/screens/08-order.jpg) | ![чат](docs/screens/09-chat.jpg) | ![просмотр](docs/screens/10-peek.jpg) |
 
-| Как найти: адрес, часы, чат и QR на витрину |
-|---|
-| ![визит](docs/screens/11-visit.jpg) |
+Дальше: [визит и карта](docs/screens/11-visit.jpg), [просмотр фото на весь экран](docs/screens/12-lightbox.jpg),
+[сезонная таблица](docs/screens/13-seasons.jpg).
 
-Пять палитр одного и того же кадра:
+Мобильная версия (390x844): [первый экран](docs/screens/20-mobile-hero.jpg),
+[ряды](docs/screens/21-mobile-aisle.jpg), [пакет](docs/screens/22-mobile-basket.jpg),
+[просмотр товара](docs/screens/23-mobile-peek.jpg).
 
-| Живой рынок | Светлая | Инжир и золото | Изумруд | Ночной базар |
-|---|---|---|---|---|
-| ![market](docs/screens/12-palette-market.jpg) | ![light](docs/screens/12-palette-light.jpg) | ![fig](docs/screens/12-palette-fig.jpg) | ![emerald](docs/screens/12-palette-emerald.jpg) | ![night](docs/screens/12-palette-night.jpg) |
-
-Телефон 390×844:
-
-| Первый экран | Ряды | Пакет |
-|---|---|---|
-| ![телефон](docs/screens/20-mobile-hero.jpg) | ![ряды](docs/screens/21-mobile-aisle.jpg) | ![пакет](docs/screens/22-mobile-basket.jpg) |
+Палитры целиком: [market](docs/screens/14-palette-market.jpg),
+[light](docs/screens/14-palette-light.jpg), [fig](docs/screens/14-palette-fig.jpg),
+[emerald](docs/screens/14-palette-emerald.jpg), [night](docs/screens/14-palette-night.jpg).
 
 ## Структура
 
 ```
-index.html            страница: разметка + inline SVG-спрайт иконок + JSON-LD магазина
-css/style.css         все пять палитр, компоненты и печать — одним файлом
-js/app-head.js        тема до первой отрисовки: localStorage → data-theme на <html>
-js/data.js            данные: магазин, позиции, промокоды, ключи localStorage
-js/app.js             приложение: каталог, пакет, конструктор, сезоны, лайтбокс, чат
-sw.js                 офлайн-кэш (версию проставляет сборка)
-404.html              страница «не найдено» в тех же темах
-manifest.webmanifest  PWA: иконки, цвет, start_url
-tools/build.py        сборка: шрифты, фото, og, QR витрины, SEO-каталог, иконки PWA, минификация
-tools/test_cart.py    юнит-тесты пакета в реальном JS-движке (quickjs)
-tools/check.py        гейт качества: разметка, JSON-LD, ссылки, иконки, CSP, палитры, тап-цели
-tools/gate_bite.py    доказательство, что каждый пункт гейта кусается (мутации файлов)
-.github/workflows/deploy.yml  CI: secret scan → сборка → тесты → гейт → Pages
-docs/screens/             скриншоты живого рендера (1440×900 и 390×844)
+index.html              витрина: разметка, стили, скрипты, данные 25 позиций
+404.html                заглушка Pages, самодостаточная, со своим CSP
+assets/img/*.jpg        25 кадров x 7 размеров, кадрирование заранее готово
+assets/fonts/*.woff2    Cormorant Garamond и Manrope, подмножества latin и cyrillic
+assets/fonts.css        подключение шрифтов с font-display: swap
+assets/logo.svg         фавикон и иконка манифеста
+assets/qr.svg           QR на эту страницу, блок «Как найти»
+assets/og.png           превью ссылки 1200x630
+assets/icon-192.png     иконки для домашнего экрана и манифеста
+assets/icon-512.png
+assets/CREDITS.txt      лицензии фото и шрифтов, происхождение файлов
+robots.txt              правила индексации
+sitemap.xml             карта сайта
+manifest.webmanifest    PWA-манифест
+scripts/gate.mjs        статический гейт: цифры, ссылки, контраст, синхронизации
+make_zip.py             сборка fruktovy-dvorets-release.zip из командной строки
+AGENT_DEPLOY.md         как выложить это в репозиторий и на хостинг
+NEXT_AGENT_PROMPT.md    системный промпт для того, кто продолжит работу
+.github/workflows/      deploy.yml (Pages) и codeql.yml
 ```
 
 ## Открыть витрину на телефоне
 
-![QR-код на сайт](assets/qr.svg)
+1. Включите на телефоне и на компьютере одну и ту же сеть Wi-Fi.
+2. Узнайте локальный адрес машины и запустите сервер на всех интерфейсах:
 
-Наведите камеру — откроется https://ssrjkk.github.io/fruktovy/ . Код рисует `tools/build.py`
-из `<link rel="canonical">`, поэтому он вечный: адрес Pages не меняется, а при смене домена
-QR пересоберётся сам. `tools/check.py` разбирает нарисованную матрицу модулей и сверяет её с
-canonical — «код ведёт не туда» краснеет на сборке.
+   ```bash
+   python -m http.server 8080 --bind 0.0.0.0
+   ```
+
+3. На телефоне откройте `http://<адрес-компьютера>:8080/`.
+4. Быстрее всего — навести камеру на `assets/qr.svg`: он ведёт на опубликованный адрес.
 
 ## Локальный запуск
 
 ```bash
-python -m venv .venv && . .venv/Scripts/activate   # Windows: .venv\Scripts\activate
-pip install pillow rcssmin rjsmin quickjs segno
-python tools/build.py               # фото (Pexels) и шрифты (OFL) в assets/, css/js не трогает
-python tools/test_cart.py
-python tools/check.py
-python -m http.server 8080   # и открыть http://localhost:8080
+python -m http.server 8080     # открыть http://127.0.0.1:8080/
 ```
 
-`build.py` идемпотентен, но минификацию делает НАД ИСХОДНИКАМИ: `python tools/build.py --minify`
-(в CI это шаг `--minify-only`) перетирает `css/style.css`, `css/fonts.css` и все `js/*.js` их
-jsmin-версией, а заодно обновляет версию кэша service worker и lastmod в sitemap. Обычный
-`python tools/build.py` css/js не трогает — только качает ассеты и штампы. Локально поэтому
-и запускают сборку без минификации: читаемые css/js нужны не только для глаз,
-`tools/gate_bite.py` ищет правила мутаций по исходному тексту и на переминифицированном
-дереве падает на собственном якоре. В CI это безопасно — там своя копия репозитория, гейты
-прогоняются по читаемым исходникам, а боевой (минифицированный) вид CI собирает сам.
-Сгенерированные ассеты (assets/img, шрифты, fonts.css, og, иконки PWA) в git не хранятся —
-их собирает CI на каждом деплое. Если Pexels не отдал фото, сборка падает с `PHOTO FAIL`
-и пишет плейсхолдеры только в рабочую копию: красная сборка перезапускается, а витрина
-с градиентными плитками вместо фруктов висела бы до первого взгляда.
+`file://` тоже открывается, но тогда кнопка выгрузки ZIP и повторный запрос файлов не
+работают: архив собирается запросами к серверу, а не из текста страницы.
 
 ## Проверки перед push
 
 ```bash
-python tools/check.py        # статика: 193 гейта и 14 оборотов FORBIDDEN
-python tools/gate_bite.py    # 214 мутаций: каждая обязана сломать сборку
+node scripts/gate.mjs                     # статика: ссылки, каталог, контраст, FAQ 1:1, CSP
+node -e "const fs=require('fs');const s=fs.readFileSync('index.html','utf8');
+  [...s.matchAll(/<script(?![^>]*ld\\+json)[^>]*>([\\s\\S]*?)<\\/script>/g)]
+  .forEach((m,i)=>fs.writeFileSync('_s'+i+'.js',m[1]));" && node --check _s0.js && node --check _s1.js
+python make_zip.py                        # архив собирается, все 10 файлов целы
 ```
 
-`gate_bite.py` правит файлы в рабочей копии и восстанавливает их по снимку; exit 0 означает,
-что ни один пункт гейта не протух. Статические проверки не заменяют осмотр пикселей:
-contrast, кольцо фокуса, reduced-motion и печать сверяются скриншотами живого рендера —
-эти замеры лежат вне репозитория и запускаются вручную перед каждым релизом.
+Гейт проверяет числами: у 25 позиций описания и уникальные кадры, месяцы сезона идут по
+возрастанию, каждый генерируемый путь `assets/img/<id>-<w>x<h>.jpg` лежит в репозитории,
+контраст посчитан из хексов токенов по пяти палитрам и 14 парам (порог 4.5:1, худшая пара —
+5.32:1), вопросы видимого FAQ совпадают с JSON-LD знак в знак, в интерфейсе нет пиктограмм,
+у всех `img` заданы `width`/`height` и `alt`, страница не ходит на чужие домены.
+
+Статика не заменяет осмотр пикселей: фокус, reduced-motion, печать, контраст из живого DOM,
+Zero-CLS и реальная раскладка на 320, 360, 390, 414 и 1440px сверяются живым браузером перед
+каждым релизом (шаги в `AGENT_DEPLOY.md`).
 
 ## Деплой
 
-1. Push в `main` → job `quality` (secret scan, сборка, тесты, гейт) → деплой на Pages.
-2. Settings → Pages → Source: **GitHub Actions** (больше ничего настраивать не нужно).
+1. Push в `main` → job `quality` (secret scan, `node --check`, `scripts/gate.mjs`) → job `deploy` → Pages.
+2. Settings → Pages → Source: **GitHub Actions**.
 
 Canonical-адрес: `https://ssrjkk.github.io/fruktovy/`. При подключении своего домена
-заменить адрес в `index.html` (canonical, og:url), `robots.txt`, `sitemap.xml`.
+заменить адрес нужно в `index.html` (canonical, og:url, JSON-LD `@id` и `url`), `robots.txt`
+и `sitemap.xml` — гейт проверит, что все три сошлись на одном origin.
 
 ## Темы оформления
 
 Пять палитр одного и того же сайта: «Живой рынок» (по умолчанию), «Светлая витрина»,
-«Инжир и золото», «Изумруд и пергамент», «Ночной базар». Переключатель — `.theme-swatches`
-в первом экране и `.mobile-themes` в мобильном меню; разметка и данные общие, отличаются
-только токены. Выбор хранится в localStorage под ключом `fd.theme` и применяется
-`js/app-head.js` до первой отрисовки, поэтому вспышки чужой темы при загрузке нет.
+«Инжир и золото», «Изумруд и пергамент», «Ночной базар». Переключатель — свотчи в первом
+экране и в мобильном меню; разметка и данные общие, отличаются только токены. Выбор
+хранится в localStorage под ключом `fd.theme` и применяется маленьким инлайновым скриптом
+до первой отрисовки, поэтому вспышки чужой темы при загрузке нет.
 
-- Все палитры живут в `css/style.css` блоками `html[data-theme="…"]`; база — `:root`,
-  она же `market`. Отдельного файла тем больше нет.
-- `tools/check.py` не даёт палитре завести токен, которого нет в базе, и наоборот:
-  каждый токен обязан быть переопределен во всех пяти, иначе сборка красная.
-- Чтобы убрать тему, достаточно вычеркнуть её блок в css и кнопку в `index.html` —
-  база останется рабочей; правок в js не требуется.
+- Все палитры живут в `index.html` блоками `html[data-theme="…"]`; база — `:root`, она же `market`.
+- Гейт требует, чтобы каждый проверяемый токен был переопределен во всех пяти палитрах:
+  если в одной теме токен пропущен, сравнение контраста не состоится и сборка красная.
+- Чтобы убрать тему, достаточно вычеркнуть её блок и кнопку — база останется рабочей.
+
+Рядом с темами живёт переключатель `3D карточки` / `2D` (`fd.cardMode`): на тач-экранах
+и при `prefers-reduced-motion: reduce` витрина сама становится в 2D.
 
 ## Данные и цены
 
-Цен на сайте нет намеренно: `price` и `oldPrice` в `js/data.js` всегда `null`, карточка
-показывает «цена по запросу», а итог пакета продавец называет в Telegram. Чтобы включить
-цены, проставить `price` в данных — корзина, конструктор и SEO подхватят сами, но тогда
-нужен и способ оплаты: сейчас его нет, и кнопка «оформить» открывает заявку, а не чек.
+Каталог — массив `PRODUCTS` в `index.html`, 25 позиций. Поля: `id`, `name`, `desc` (одна
+строка про вкус и происхождение), `cat`, `unit`, `weightKg`, `price`, `oldPrice`, `photo`
+(идентификатор кадра), `color`, `season` (месяцы по возрастанию), `tag`, `together`, `note`.
 
-Позиция в `PRODUCTS` — это и есть витрина: `name`, `unit`, `photo` (id снимка Pexels или свой
-файл в `assets/img`), `season` (месяцы), `use` (что из этого на кухне) и `store` (как хранить
-его дома). Правка `js/data.js` не требует сборки: push в `main`, CI соберёт и выложит на Pages.
-`tools/check.py` не даст оставить позицию без описания, без заметки о хранении и без решения,
-когда грузить её фото.
+Добавить позицию — это три правки в одном месте: строка в `PRODUCTS`, ссылка в ряд
+(`rows`) и кадр в `assets/img/` во всех размерах, которые запросит код:
+
+```bash
+# размеры, которые витрина просит для каждого id
+node -e "const s=require('fs').readFileSync('index.html','utf8');
+  const set=new Set([...s.matchAll(/photoSrc\([^,]+,\s*(\d+),\s*(\d+)\)/g)].map(m=>m[1]+'x'+m[2]));
+  console.log([...set].sort().join(' '))"
+```
+
+Цены пересчитываются вручную под утренний завоз: витрина не хранит прайс на сервере,
+`₽` берутся прямо из массива. Промокоды (`РЫНОК10`, `ПРИВЕТ`) и порог бесплатной доставки
+(2 500 ₽) — константы в том же файле.
 
 ## Печать и движение
 
-- `@media print` оставляет на листе список, ряды, сезоны, реквизиты и ответы частых вопросов;
-  кнопки, фильтры, поиск, маркизу, чат и плавающий док связи прячет, всё дерево красится
-  чёрным по белому. Гейт следит, чтобы в этом списке не было селекторов в никуда:
-  мёртвый селектор вернул бы на бумагу кнопку, которую все считали убранной.
-- `prefers-reduced-motion: reduce` останавливает бегущую строку, отключает плавный перелёт
-  по якорям и не даёт включить 3D-наклон карточек: `js/app-head.js` при этом флаге ставит
-  `data-cards="2d"` до первой отрисовки.
+Печатная версия (`@media print`) оставляет на листе состав пакета, сумму и контакты,
+срезая декор, карточки прилавка и плавающие кнопки — чек можно распечатать из браузера.
+Анимации наклона и поворота ящика идут только через `transform` и `opacity` внутри
+`requestAnimationFrame`, `will-change` снимается в покое, `content-visibility: auto`
+подключён для длинных секций, `scrollbar-gutter: stable` убирает сдвиг макета при открытии
+диалогов.
+
+## Выгрузка проекта из браузера
+
+Кнопка `Скачать ZIP-архив проекта` в подвале запрашивает десять файлов релиза у того же
+сервера и пакует их в `fruktovy-dvorets-release.zip` (STORE, собственный CRC-32, без
+библиотек). То же самое делает `python make_zip.py`, а `--with-assets` добавляет фото и
+шрифты — полный офлайн-комплект. Архив содержит ровно те файлы, которые лежат в репозитории,
+поэтому расхождение между скачанным и задеплоенным невозможно.
 
 ## Что нужно от магазина, чтобы сайт работал сам
 
-- Свои снимки прилавка вместо стоковых: сейчас группы товаров делят одни и те же фото.
-- Один телефон и один чат вместо двух номеров и мессенджера: `SHOP.phone` и `SHOP.tg` в
-  `js/data.js` — единственный источник. Гейт сверяет с ними `telephone` в JSON-LD, каждую
-  `tel:-ссылку`, каждую ссылку `t.me` и номер, который видит глаз; плюс запрещает любые
-  чужие мессенджеры и соцсети. Разъезд ломает сборку.
-- Домен: при подключении достаточно заменить адрес в `index.html` (canonical, og:url),
-  `robots.txt` и `sitemap.xml`.
-- Цены — если решат их показывать: тогда пакет и конструктор начнут считать итог сами.
+- Прайс-лист в понятном виде (позиция, цена, единица, сезон) — сейчас цифры вносятся руками.
+- Ответственный за Telegram-аккаунт @ssrjkk: заявка уходит туда, там же продавец называет
+  итог и присылает счёт.
+- Если понадобится настоящая оплата — подключается эквайринг или СБП-счёт, и чекаут
+  переписывается на серверный вызов; визуально и по геометрии карточек это не меняется.
+- Фото витрины лучше свои: сейчас это стоковые кадры Pexels, лежащие в репозитории, —
+  снимки самой лавки были бы честнее и узнаваемее.
 
 ## Лицензии ассетов
 
-Фото — Pexels License; шрифты Manrope, Cormorant Garamond и Oswald — SIL OFL 1.1
-(качаются сборкой из @fontsource); иконки — inline SVG в `index.html`, рисуются здесь же.
-Сторонних JS-библиотек в витрине нет: наклон карточек, лайтбокс, пакет и переключение палитр
-написаны руками.
-Полный список — `assets/CREDITS.txt` после сборки.
-
----
+Фото — Pexels License (без обязательной атрибуции), шрифты — SIL Open Font License 1.1.
+Список идентификаторов кадров, размеров и происхождения файлов лежит в `assets/CREDITS.txt`.
+Все ассеты скопированы в репозиторий, страница ничего не подгружает извне.
 
 ## English (brief)
 
-Single-page storefront for a fruit and vegetable shop in Saint Petersburg: 25 catalog
-positions, search, aisle/grid views, an order basket, crate builder, seasonal calendar and
-gallery. No prices and no payments are shown — the seller names the day's price in Telegram,
-and checkout opens a messenger request.
-Vanilla HTML/CSS/JS, all assets self-hosted, zero trackers, no third-party JS libraries.
-Five palettes share one markup and one stylesheet: each is a `html[data-theme="…"]` token
-block, the choice is stored in `localStorage` (`fd.theme`) and applied before first paint by
-`js/app-head.js`. CI (`quality` job) runs a secret scan, builds assets (Pexels photos, OFL
-fonts), executes basket unit tests in a real JS engine and a 193-check quality gate, then
-deploys to GitHub Pages. Run locally: `pip install pillow rcssmin rjsmin quickjs segno`, then
-`python tools/build.py && python tools/test_cart.py && python tools/check.py`
-(plain `build.py` leaves css/js readable; the minifying step is `--minify` and belongs to CI,
-see «Локальный запуск»).
+Single-page storefront for a fruit shop on Sytninskaya street 12, Saint Petersburg: 25
+catalog items with search, aisles and grid views, basket with reorder, crate builder,
+seasonal calendar, gallery with lightbox, five color themes, 2D and 3D cards, seller chat,
+and a footer button that exports the whole project as `fruktovy-dvorets-release.zip`.
+
+No payment is taken on the page: checkout produces an order, the shop replies in Telegram
+with an SBP or card invoice, or the customer pays on pickup. Acquiring is not connected.
+
+Everything ships as static files — `index.html` with its own CSS and JS, photos, fonts,
+icons and social preview committed to the repository. A `Content-Security-Policy` meta and
+`scripts/gate.mjs` keep that promise: the gate counts contrast ratios from the palette hex
+values across all five themes (4.5:1 floor), verifies that every generated image path exists
+in the repo, checks that the visible FAQ matches the JSON-LD question for question, and
+rejects third-party hosts, placeholder domains, emoji in the interface and images without
+`width`/`height`.
+
+Run it locally with `python -m http.server 8080`, check with `node scripts/gate.mjs`,
+publish by pushing to `main` — GitHub Actions runs the gate and deploys to GitHub Pages at
+`https://ssrjkk.github.io/fruktovy/`.

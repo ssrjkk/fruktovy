@@ -20,9 +20,11 @@ jobs:
       actions: read
       security-events: write
 
-    # tools/check.py смотрит на разметку, ссылки и токены — это гейт витрины,
-    # а не анализатор кода. CodeQL добавляет то, чего статика не видит:
-    # опасные источники в js/*.js (innerHTML, URL, storage) и в python-сборке.
+    # scripts/gate.mjs следит за разметкой, ссылками, токенами и синхронизациями —
+    # это гейт витрины, а не анализатор кода. CodeQL добавляет то, чего статика не видит:
+    # опасные источники в javascript (innerHTML, URL, storage) и в python-скриптах.
+    # Инлайновые скрипты страницы анализатор не разбирает, для них в deploy.yml стоит
+    # node --check и в живом браузере смотрятся нарушения CSP.
     strategy:
       fail-fast: false
       matrix:
