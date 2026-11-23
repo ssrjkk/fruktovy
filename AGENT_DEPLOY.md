@@ -154,6 +154,21 @@ Push в `main` запускает workflow `Deploy to GitHub Pages`: `quality` (
 Следить: `gh run watch` или Actions на GitHub. Откат — реvert коммита, история сохранена,
 `backup/*` остаётся доступной.
 
+Если публикация идёт не `git push`, а через Git Data API (blob → tree → commit →
+`PATCH /repos/.../git/refs/heads/main`, то есть без клона на машине), workflow не
+срабатывает: коммит на `main` есть, а Pages остаётся со старыми байтами. Проверено в
+ноябре 2026 — помогал только ручной запуск:
+
+```bash
+gh api -X POST repos/ssrjkk/fruktovy/actions/workflows/deploy.yml/dispatches \
+  -f ref=main
+```
+
+Отличить одно от другого просто: `gh api repos/ssrjkk/fruktovy/git/refs/heads/main`
+показывает свежий коммит, а `curl -s https://ssrjkk.github.io/fruktovy/index.html` —
+старые байты. Тогда и только тогда нужен dispatch; после него `run_number` растёт,
+job `deploy` зелёный, и страница совпадает с репозиторием побайтно.
+
 ### Шаг 6. Если попросили настоящий магазин
 
 Вынести `PRODUCTS` в `products.json` с валидатором схемы (уникальные кадры, цены больше
