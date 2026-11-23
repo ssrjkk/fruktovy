@@ -207,3 +207,7 @@ rejects third-party hosts, placeholder domains, emoji in the interface and image
 Run it locally with `python -m http.server 8080`, check with `node scripts/gate.mjs`,
 publish by pushing to `main` — GitHub Actions runs the gate and deploys to GitHub Pages at
 `https://ssrjkk.github.io/fruktovy/`.
+
+## Документация
+
+- [Deploy](AGENT_DEPLOY.md)
