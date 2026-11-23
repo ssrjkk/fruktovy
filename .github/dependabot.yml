@@ -1,10 +1,11 @@
 version: 2
-# @author ssrjkk | «Фруктовый»
+# @author ssrjkk | обновлено
 #
-# Обновлять тут нечего, кроме версий actions: витрина живёт на чистых
-# HTML/CSS/JS, python-зависимости ставятся в CI построчно (pillow, rcssmin,
-# rjsmin, esprima, quickjs, qrcode) и lock-файла у них нет — pip-экосистема
-# dependabot без него падает с «No requirements file». Поэтому экосистема одна.
+# Следим только за actions: витрина — один index.html со своими стилями и скриптами,
+# npm-зависимостей и pip-зависимостей в репозитории нет (шрифты, фото и иконки лежат
+# файлами, архив собирается make_zip.py на чистой стандартной библиотеке Python).
+# Поэтому у dependabot нет ни package.json, ни requirements.txt — обновлять ему нечего,
+# кроме steps в .github/workflows.
 updates:
   - package-ecosystem: 'github-actions'
     directory: '/'
