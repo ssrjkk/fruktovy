@@ -7,7 +7,12 @@ Static storefront for a fruit shop at Sytninskaya Street 12 in Saint Petersburg:
 seasonal calendar, gallery, five themes and seller chat. The full Russian
 documentation is in [README.ru.md](README.ru.md).
 
-**Site:** https://ssrjkk.github.io/fruktovy/
+**Site:** https://ssrjkk.github.io/fruktovy/  
+**Source:** https://github.com/ssrjkk/fruktovy
+
+## Screenshot
+
+![Fruktovy Dvorets](docs/screens/01-hero.jpg)
 
 No payment is taken on the page. Checkout creates an order; the shop replies in
 Telegram with an SBP or card invoice, or the customer pays on pickup. Acquiring is
